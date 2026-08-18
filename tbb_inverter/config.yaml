@@ -1,10 +1,9 @@
 name: "TBB Inverter Reader"
-version: "1.0.0"
+version: "1.0.1"
 slug: "tbb_inverter"
 description: "Lettura e scrittura RS485/MQTT per inverter TBB RiiO Sun II"
 url: "https://github.com/CarloFalco/ha-tbb-inverter-addon/tree/main/tbb_inverter"
 arch:
-  - armv7
   - aarch64
   - amd64
 init: false
