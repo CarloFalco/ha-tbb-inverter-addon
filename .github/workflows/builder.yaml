@@ -1,9 +1,15 @@
 name: Build add-on
 
-# Compila l'immagine dell'add-on e la pubblica su GHCR ad ogni push su main e
-# ad ogni tag. Dopo la prima esecuzione riuscita, decommenta la riga `image:`
-# in tbb_inverter/config.yaml: gli utenti scaricheranno l'immagine gia' pronta
-# invece di compilarla sul proprio Raspberry Pi.
+# Compila l'immagine dell'add-on per ogni architettura e la pubblica su GHCR.
+#
+# L'immagine base NON e' definita qui ma nel Dockerfile (`ARG BUILD_FROM`), che
+# e' anche quello che usa il Supervisor quando un utente installa l'add-on da
+# sorgente: una sola fonte di verita', nessun rischio che CI e installazione
+# locale partano da basi diverse.
+#
+# Dopo la prima esecuzione riuscita puoi aggiungere in tbb_inverter/config.yaml:
+#     image: "ghcr.io/carlofalco/{arch}-tbb-inverter"
+# cosi' gli utenti scaricano l'immagine gia' pronta invece di compilarla.
 
 on:
   push:
@@ -14,45 +20,63 @@ on:
   pull_request:
     paths:
       - "tbb_inverter/**"
+      - ".github/workflows/builder.yaml"
   workflow_dispatch:
 
 jobs:
+  info:
+    name: Prepara
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Leggi versione e prefisso registry
+        id: meta
+        run: |
+          version=$(grep -oP '^version:\s*"\K[^"]+' tbb_inverter/config.yaml)
+          [ -n "${version}" ] || { echo "::error::versione non trovata in config.yaml"; exit 1; }
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          # GHCR accetta solo nomi minuscoli, il proprietario del repo no.
+          echo "prefix=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+          echo "Versione add-on: ${version}"
+
+      - name: Costruisci la matrice di build
+        id: matrix
+        uses: home-assistant/builder/actions/prepare-multi-arch-matrix@2026.06.0
+        with:
+          architectures: '["amd64", "aarch64"]'
+          image-name: tbb-inverter
+          registry-prefix: ${{ steps.meta.outputs.prefix }}
+
   build:
     name: Build ${{ matrix.arch }}
-    runs-on: ubuntu-latest
+    needs: info
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
-      matrix:
-        arch: [aarch64, amd64]
+      matrix: ${{ fromJSON(needs.info.outputs.matrix) }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Get add-on version
-        id: meta
-        run: |
-          version=$(grep -oP '^version:\s*"\K[^"]+' tbb_inverter/config.yaml)
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "Versione add-on: ${version}"
-
-      - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+      - name: Build & push
+        uses: home-assistant/builder/actions/build-image@2026.06.0
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build add-on
-        uses: home-assistant/builder@master
-        with:
-          args: |
-            ${{ github.event_name != 'pull_request' && '--docker-hub-check' || '--test' }} \
-            --${{ matrix.arch }} \
-            --target /data/tbb_inverter \
-            --image tbb-inverter-{arch} \
-            --docker-hub ghcr.io/${{ github.repository_owner }} \
-            --addon
+          arch: ${{ matrix.arch }}
+          image: ${{ matrix.image }}
+          image-tags: |
+            ${{ needs.info.outputs.version }}
+            latest
+          version: ${{ needs.info.outputs.version }}
+          context: ./tbb_inverter
+          # Sulle pull request si compila soltanto, senza pubblicare.
+          push: ${{ github.event_name != 'pull_request' }}
+          cosign: false
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}

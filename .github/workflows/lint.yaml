@@ -11,9 +11,9 @@ jobs:
     name: Add-on config
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Validate config.yaml
-        uses: frenck/action-addon-linter@v2
+        uses: frenck/action-app-linter@v2.21.1
         with:
           path: "./tbb_inverter"
 
@@ -21,8 +21,8 @@ jobs:
     name: Python
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - name: Install Ruff
@@ -40,7 +40,7 @@ jobs:
     name: Shell
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: ShellCheck
         uses: ludeeus/action-shellcheck@master
         env:

@@ -9,8 +9,6 @@ arch:
 init: false
 uart: true
 startup: services
-boot: auto
-stage: stable
 # Richiede (senza imporre) il broker MQTT di Home Assistant: se `mqtt_host` e'
 # vuoto, host e credenziali vengono presi automaticamente da qui.
 services:

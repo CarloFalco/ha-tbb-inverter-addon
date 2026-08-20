@@ -48,7 +48,11 @@
   frattempo.
 - **`build.yaml` non era stato realmente rimosso** nella 1.0.1: quando presente
   aveva la precedenza sul `Dockerfile` e riportava in gioco Python 3.12,
-  Alpine 3.19 e l'architettura `armv7` non più supportata.
+  Alpine 3.19 e l'architettura `armv7` non più supportata. Ora l'immagine
+  base è dichiarata solo nel `Dockerfile` (`ARG BUILD_FROM`): senza
+  `build.yaml` il Supervisor non passa più `BUILD_FROM` e lascia decidere al
+  `Dockerfile`, che diventa l'unica fonte di verità per CI e installazioni
+  locali.
 - `io.hass.type` nel Dockerfile era `app` invece di `addon`.
 - Rimosso l'import inutilizzato di `struct`.
 
@@ -63,7 +67,11 @@
 - Suite di test senza hardware (`tests/test_reader.py`): CRC, decodifica,
   gestione dei frame corti, discovery, comandi e disponibilità.
 - Workflow GitHub Actions per lint (add-on, Python, shell), test e build
-  multi-architettura su GHCR.
+  multi-architettura su GHCR, basati sulle action mantenute di
+  `home-assistant/builder`: quella monolitica è deprecata e ricavava
+  l'immagine base da `build.yaml`.
+- Rimosse da `config.yaml` le chiavi `boot` e `stage`, che ripetevano il
+  valore predefinito e facevano fallire il linter ufficiale degli add-on.
 
 ## 1.0.1
 
