@@ -1,7 +1,7 @@
 name: "TBB Inverter Reader"
-version: "1.0.1"
+version: "1.1.0"
 slug: "tbb_inverter"
-description: "Lettura e scrittura RS485/MQTT per inverter TBB RiiO Sun II"
+description: "Lettura e controllo via RS485/MQTT dell'inverter TBB RiiO Sun II, con creazione automatica delle entita' in Home Assistant"
 url: "https://github.com/CarloFalco/ha-tbb-inverter-addon/tree/main/tbb_inverter"
 arch:
   - aarch64
@@ -10,21 +10,36 @@ init: false
 uart: true
 startup: services
 boot: auto
+stage: stable
+# Richiede (senza imporre) il broker MQTT di Home Assistant: se `mqtt_host` e'
+# vuoto, host e credenziali vengono presi automaticamente da qui.
+services:
+  - mqtt:want
 options:
   serial_port: "/dev/ttyUSB0"
   baudrate: 9600
   poll_interval: 5
-  mqtt_host: "core-mosquitto"
+  mqtt_host: ""
   mqtt_port: 1883
   mqtt_user: ""
   mqtt_password: ""
   mqtt_prefix: "tbb/inverter"
+  mqtt_discovery: true
+  discovery_prefix: "homeassistant"
+  allow_raw_command: false
+  strict_crc: false
+  log_level: "info"
 schema:
   serial_port: str
-  baudrate: int
+  baudrate: int(300,115200)
   poll_interval: int(1,3600)
-  mqtt_host: str
+  mqtt_host: str?
   mqtt_port: port
-  mqtt_user: str
-  mqtt_password: password
+  mqtt_user: str?
+  mqtt_password: password?
   mqtt_prefix: str
+  mqtt_discovery: bool
+  discovery_prefix: str
+  allow_raw_command: bool
+  strict_crc: bool
+  log_level: list(trace|debug|info|notice|warning|error|fatal)

@@ -1,0 +1,58 @@
+name: Build add-on
+
+# Compila l'immagine dell'add-on e la pubblica su GHCR ad ogni push su main e
+# ad ogni tag. Dopo la prima esecuzione riuscita, decommenta la riga `image:`
+# in tbb_inverter/config.yaml: gli utenti scaricheranno l'immagine gia' pronta
+# invece di compilarla sul proprio Raspberry Pi.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tbb_inverter/**"
+      - ".github/workflows/builder.yaml"
+  pull_request:
+    paths:
+      - "tbb_inverter/**"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64, amd64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get add-on version
+        id: meta
+        run: |
+          version=$(grep -oP '^version:\s*"\K[^"]+' tbb_inverter/config.yaml)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Versione add-on: ${version}"
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build add-on
+        uses: home-assistant/builder@master
+        with:
+          args: |
+            ${{ github.event_name != 'pull_request' && '--docker-hub-check' || '--test' }} \
+            --${{ matrix.arch }} \
+            --target /data/tbb_inverter \
+            --image tbb-inverter-{arch} \
+            --docker-hub ghcr.io/${{ github.repository_owner }} \
+            --addon

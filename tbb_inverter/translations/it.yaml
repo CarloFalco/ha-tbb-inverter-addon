@@ -1,0 +1,58 @@
+configuration:
+  serial_port:
+    name: Porta seriale
+    description: >-
+      Percorso dell'adattatore USB-RS485. Preferisci un percorso stabile
+      /dev/serial/by-id/... : /dev/ttyUSB0 puo' cambiare al riavvio.
+  baudrate:
+    name: Baudrate
+    description: Velocita' della linea RS485. L'inverter usa 9600.
+  poll_interval:
+    name: Intervallo di polling
+    description: >-
+      Secondi di pausa tra un ciclo di lettura e il successivo. 5 e' un buon
+      compromesso; valori bassi aumentano le scritture nel database.
+  mqtt_host:
+    name: Host MQTT
+    description: >-
+      Lascia vuoto per usare automaticamente il broker configurato in Home
+      Assistant. Compilalo solo per un broker esterno.
+  mqtt_port:
+    name: Porta MQTT
+    description: Usata solo se hai compilato l'host MQTT.
+  mqtt_user:
+    name: Utente MQTT
+    description: Usato solo se hai compilato l'host MQTT.
+  mqtt_password:
+    name: Password MQTT
+    description: Usata solo se hai compilato l'host MQTT.
+  mqtt_prefix:
+    name: Prefisso dei topic
+    description: Prefisso di tutti i topic pubblicati e dei comandi in ingresso.
+  mqtt_discovery:
+    name: Creazione automatica delle entita'
+    description: >-
+      Pubblica i messaggi di MQTT Discovery: sensori e slider SmartPort
+      compaiono da soli come un unico dispositivo, senza YAML.
+  discovery_prefix:
+    name: Prefisso di Discovery
+    description: >-
+      Cambialo solo se hai personalizzato il prefisso di discovery
+      dell'integrazione MQTT. Default: homeassistant.
+  allow_raw_command:
+    name: Consenti frame RS485 grezzi
+    description: >-
+      Abilita il topic cmd/raw, che scrive direttamente nei registri
+      dell'inverter. Tienilo disattivo se non ti serve.
+  strict_crc:
+    name: Verifica CRC rigorosa
+    description: >-
+      Scarta le risposte il cui CRC non e' valido invece di provare comunque a
+      decodificarle. Attivalo solo dopo aver visto nel log che la verifica CRC
+      funziona sul tuo inverter.
+  log_level:
+    name: Livello di log
+    description: >-
+      info mostra la tabella dei valori ad ogni ciclo, notice solo gli eventi,
+      debug aggiunge i frame esadecimali TX/RX.
+network: {}

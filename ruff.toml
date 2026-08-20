@@ -1,0 +1,15 @@
+line-length = 100
+target-version = "py313"
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "ISC", "RUF"]
+ignore = [
+    "E501",    # lunghezza riga gestita dal formatter, non bloccante
+]
+
+[lint.per-file-ignores]
+# Il catch generico in on_message e' voluto: un'eccezione non gestita nel
+# thread di rete di paho interromperebbe il loop MQTT.
+"tbb_inverter/tbb_reader.py" = ["BLE001"]
+# Nei test la leggibilita' delle asserzioni viene prima dello stile.
+"tests/*.py" = ["RUF015", "SIM905", "E402"]

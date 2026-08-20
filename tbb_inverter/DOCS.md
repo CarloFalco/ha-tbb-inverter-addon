@@ -8,10 +8,10 @@ Home Assistant.
 | [🔌 Collegamento hardware](#-collegamento-hardware) | Cablaggio RJ45 ↔ RS485 |
 | [⚙️ Opzioni](#-opzioni-dellagg-on) | Tutti i parametri configurabili |
 | [🔗 Porta seriale stabile](#-porta-seriale-stabile) | Evitare che `/dev/ttyUSB0` cambi |
-| [📡 Topic MQTT](#-topic-mqtt-pubblicati) | Elenco completo delle grandezze |
-| [🏠 Sensori in Home Assistant](#-creare-i-sensori-in-home-assistant) | YAML pronto da copiare |
+| [🏠 Le entità in Home Assistant](#-le-entità-in-home-assistant) | Create da sole, senza YAML |
 | [⚡ Energy Dashboard](#-energy-dashboard) | Da watt a kWh |
 | [🎛️ Comandi di scrittura](#-comandi-di-scrittura) | SmartPort e frame raw |
+| [📡 Topic MQTT](#-topic-mqtt) | Riferimento completo dei topic |
 | [🛠️ Risoluzione problemi](#-risoluzione-problemi) | Cosa fare quando non funziona |
 
 ---
@@ -48,22 +48,37 @@ flusso.
 
 ## ⚙️ Opzioni dell'add-on
 
+### Connessione
+
 | Opzione | Default | Descrizione |
 |---|---|---|
 | `serial_port` | `/dev/ttyUSB0` | Percorso della porta seriale dell'adattatore RS485. Vedi [porta seriale stabile](#-porta-seriale-stabile). |
 | `baudrate` | `9600` | Velocità della linea. L'inverter usa 9600: cambiala solo se sai cosa fai. |
 | `poll_interval` | `5` | Secondi di pausa tra un ciclo di lettura e il successivo (1-3600). |
-| `mqtt_host` | `core-mosquitto` | Host o IP del broker MQTT. |
-| `mqtt_port` | `1883` | Porta del broker. |
-| `mqtt_user` | *(vuoto)* | Utente MQTT. Lascia vuoto se il broker è aperto. |
-| `mqtt_password` | *(vuoto)* | Password MQTT. |
+
+### MQTT
+
+| Opzione | Default | Descrizione |
+|---|---|---|
+| `mqtt_host` | *(vuoto)* | **Lascia vuoto** per usare automaticamente il broker configurato in Home Assistant. Compilalo solo per un broker esterno. |
+| `mqtt_port` | `1883` | Usata solo se hai compilato `mqtt_host`. |
+| `mqtt_user` | *(vuoto)* | Usato solo se hai compilato `mqtt_host`. |
+| `mqtt_password` | *(vuoto)* | Usata solo se hai compilato `mqtt_host`. |
 | `mqtt_prefix` | `tbb/inverter` | Prefisso di tutti i topic pubblicati e dei comandi. |
 
-**Broker Mosquitto ufficiale?** I default funzionano già: `core-mosquitto` è il
-nome interno del container. Ti basta creare un utente Home Assistant dedicato e
-inserirne le credenziali in `mqtt_user` / `mqtt_password`.
+> 🎉 **Con l'add-on *Mosquitto broker* non devi configurare nulla.** Lasciando
+> `mqtt_host` vuoto, l'add-on chiede host, porta e credenziali direttamente al
+> Supervisor. Compila i campi solo se il tuo broker è su un'altra macchina.
 
-**Broker esterno?** Metti il suo IP in `mqtt_host` e le relative credenziali.
+### Funzionalità
+
+| Opzione | Default | Descrizione |
+|---|---|---|
+| `mqtt_discovery` | `true` | Crea automaticamente le entità in Home Assistant. Disattivalo solo se preferisci definire i sensori a mano. |
+| `discovery_prefix` | `homeassistant` | Cambialo solo se hai personalizzato il prefisso di discovery dell'integrazione MQTT. |
+| `allow_raw_command` | `false` | Abilita il topic `cmd/raw`. Vedi [l'avviso](#frame-raw). |
+| `strict_crc` | `false` | Scarta le risposte con CRC non valido invece di provare comunque a decodificarle. |
+| `log_level` | `info` | `info` stampa la tabella dei valori ad ogni ciclo, `notice` solo gli eventi, `debug` aggiunge i frame esadecimali TX/RX. |
 
 ### Ogni quanto interrogare?
 
@@ -103,10 +118,177 @@ Questo identificativo è legato al chip dell'adattatore e non cambia mai.
 
 ---
 
-## 📡 Topic MQTT pubblicati
+## 🏠 Le entità in Home Assistant
+
+Con `mqtt_discovery` attivo (impostazione predefinita) **non devi scrivere alcuno
+YAML**. Al primo avvio l'add-on crea un dispositivo **TBB RiiO Sun II** con tutte
+le entità già configurate:
+
+**Impostazioni → Dispositivi e servizi → MQTT → TBB RiiO Sun II**
+
+### Entità create
+
+| Entità | Unità | `entity_id` |
+|---|:---:|---|
+| Potenza FV | W | `sensor.tbb_riio_sun_ii_pv_w` |
+| Tensione FV | V | `sensor.tbb_riio_sun_ii_pv_v` |
+| Corrente MPPT | A | `sensor.tbb_riio_sun_ii_mppt_i` |
+| Temperatura MPPT | °C | `sensor.tbb_riio_sun_ii_mppt_temp` |
+| Tensione batteria | V | `sensor.tbb_riio_sun_ii_bat_v` |
+| Tensione batteria BMS | V | `sensor.tbb_riio_sun_ii_bat_v_bms` |
+| Corrente batteria | A | `sensor.tbb_riio_sun_ii_bat_i` |
+| Stato di carica | % | `sensor.tbb_riio_sun_ii_soc` |
+| Stato batteria | — | `sensor.tbb_riio_sun_ii_bat_status` |
+| Temperatura batteria | °C | `sensor.tbb_riio_sun_ii_t_bat` |
+| Tensione / Corrente / Potenza uscita AC | V / A / W | `sensor.tbb_riio_sun_ii_ac_out_v` … |
+| Tensione / Corrente / Potenza uscita AC 2 | V / A / W | `sensor.tbb_riio_sun_ii_ac_out2_v` … |
+| Frequenza uscita | Hz | `sensor.tbb_riio_sun_ii_ac_freq` |
+| Carico | % | `sensor.tbb_riio_sun_ii_load_pct` |
+| Tensione / Corrente rete | V / A | `sensor.tbb_riio_sun_ii_ac_in_v` … |
+| Temperature dissipatore / trasformatore / inverter | °C | *(diagnostica)* |
+| **SmartPort** *(slider scrivibile)* | % | `number.tbb_riio_sun_ii_smart_port` |
+
+`bat_status` vale *In carica*, *In scarica* o *A riposo*, ricavato dal segno della
+corrente di batteria.
+
+### Disponibilità
+
+Tutte le entità seguono il topic `<prefix>/availability`. Se l'add-on si ferma o
+perde la porta seriale, passano a **non disponibili** invece di restare bloccate
+sull'ultimo valore letto: i grafici mostrano un buco, non una linea piatta finta.
+
+### Sensori a mano (senza discovery)
+
+<details>
+<summary>Se preferisci definire i sensori in <code>configuration.yaml</code></summary>
+
+Imposta `mqtt_discovery: false` e usa il topic aggregato `stato`, che contiene
+tutte le grandezze in un unico JSON:
+
+```yaml
+mqtt:
+  sensor:
+    - name: "Inverter PV Potenza"
+      unique_id: tbb_pv_w
+      state_topic: "tbb/inverter/stato"
+      value_template: "{{ value_json.pv_w }}"
+      availability_topic: "tbb/inverter/availability"
+      unit_of_measurement: "W"
+      device_class: power
+      state_class: measurement
+
+    - name: "Inverter Batteria SOC"
+      unique_id: tbb_soc
+      state_topic: "tbb/inverter/stato"
+      value_template: "{{ value_json.soc }}"
+      availability_topic: "tbb/inverter/availability"
+      unit_of_measurement: "%"
+      device_class: battery
+      state_class: measurement
+```
+
+Ripeti il blocco cambiando `name`, `unique_id` e la chiave in `value_template`,
+usando questa corrispondenza:
+
+| Grandezza | `device_class` | `unit_of_measurement` |
+|---|---|---|
+| Potenze (`*_w`) | `power` | `W` |
+| Tensioni (`*_v`) | `voltage` | `V` |
+| Correnti (`*_i`) | `current` | `A` |
+| Temperature (`t_*`, `mppt_temp`) | `temperature` | `°C` |
+| `soc` | `battery` | `%` |
+| `ac_freq` | `frequency` | `Hz` |
+| `load_pct` | *(nessuna)* | `%` |
+
+</details>
+
+---
+
+## ⚡ Energy Dashboard
+
+L'inverter riporta **potenze istantanee (W)**, mentre la Energy Dashboard vuole
+**energia cumulata (kWh)**. La conversione si fa con un helper di integrazione
+(somma di Riemann).
+
+**Impostazioni → Dispositivi e servizi → Helper → Crea helper → Integrale-Riemann**
+
+| Campo | Valore |
+|---|---|
+| Sensore in ingresso | `sensor.tbb_riio_sun_ii_pv_w` |
+| Metodo di integrazione | Trapezoidale |
+| Prefisso metrico | `k` (kilo) |
+| Unità di tempo massima | Ore (h) |
+
+Ottieni un sensore in kWh da aggiungere nella Energy Dashboard come **Pannelli
+solari**. Ripeti il procedimento con `sensor.tbb_riio_sun_ii_ac_out_w` se vuoi
+tracciare anche i consumi.
+
+---
+
+## 🎛️ Comandi di scrittura
+
+### SmartPort
+
+Il modo più semplice è lo **slider** creato da discovery
+(`number.tbb_riio_sun_ii_smart_port`): trascinalo, oppure usalo in un'automazione.
+
+```yaml
+action: number.set_value
+target:
+  entity_id: number.tbb_riio_sun_ii_smart_port
+data:
+  value: 40
+```
+
+In alternativa, direttamente su MQTT:
+
+```yaml
+action: mqtt.publish
+data:
+  topic: tbb/inverter/cmd/smart_port
+  payload: "40"
+```
+
+L'add-on invia automaticamente la sequenza di sblocco richiesta dall'inverter
+prima di scrivere il registro `0x005E`.
+
+### Frame raw
+
+> ⚠️ **Disabilitato per impostazione predefinita.** Attiva `allow_raw_command`
+> nella configurazione per usarlo. Questo topic scrive **direttamente** nei
+> registri dell'inverter: un frame sbagliato può modificare parametri di
+> funzionamento dell'impianto. Usalo solo se hai la documentazione del registro
+> che stai toccando, e non esporre il broker MQTT su Internet senza
+> autenticazione.
+
+Byte in esadecimale separati da spazi, **CRC incluso** (non viene calcolato
+dall'add-on):
+
+```yaml
+action: mqtt.publish
+data:
+  topic: tbb/inverter/cmd/raw
+  payload: "7E FF 11 06 06 0C 00 5E 00 28 81 46"
+```
+
+### Esito dei comandi
+
+| Topic | Valori |
+|---|---|
+| `<prefix>/cmd/smart_port/status` | `OK` / `ERRORE` |
+| `<prefix>/cmd/raw/status` | `OK` / `ERRORE` |
+
+Con `log_level: debug` la scheda **Log** mostra il dettaglio di ogni frame
+trasmesso (`TX:`) e delle risposte ricevute (`ACK:`).
+
+---
+
+## 📡 Topic MQTT
 
 Tutti i topic sono pubblicati con flag **retain**, sotto il prefisso configurato
-(qui indicato come `<prefix>`, default `tbb/inverter`).
+(qui `<prefix>`, default `tbb/inverter`). Vengono pubblicate **solo le grandezze
+effettivamente decodificate**: se un frame arriva incompleto, il topic
+corrispondente non viene aggiornato invece di finire a zero.
 
 ### ☀️ Fotovoltaico e MPPT
 
@@ -124,6 +306,7 @@ Tutti i topic sono pubblicati con flag **retain**, sotto il prefisso configurato
 | `bat_v` | V | Tensione di batteria misurata dall'inverter |
 | `bat_v_bms` | V | Tensione riportata dal BMS della batteria |
 | `bat_i` | A | Corrente di batteria **con segno**: positiva = carica, negativa = scarica |
+| `bat_status` | — | *In carica* / *In scarica* / *A riposo* |
 | `soc` | % | Stato di carica |
 | `t_bat` | °C | Temperatura della batteria |
 
@@ -151,186 +334,24 @@ Tutti i topic sono pubblicati con flag **retain**, sotto il prefisso configurato
 | `t_transformer` | °C | Trasformatore |
 | `t_inverter` | °C | Stadio inverter |
 
-### 📦 Topic aggregato
+### 📦 Topic di servizio
 
 | Topic | Contenuto |
 |---|---|
-| `stato` | JSON con **tutte** le grandezze qui sopra in un unico messaggio |
+| `stato` | JSON con tutte le grandezze lette nell'ultimo ciclo |
+| `availability` | `online` / `offline` — usato da tutte le entità |
+| `smart_port` | Ultimo valore SmartPort impostato con successo |
 
 ```json
 {"ac_out_w": 1116, "ac_out_v": 230.2, "bat_v": 53.412, "bat_i": 14.2,
- "soc": 87, "pv_w": 1817, "pv_v": 248.6, "mppt_i": 7.31, ...}
+ "bat_status": "In carica", "soc": 87, "pv_w": 1817, "pv_v": 248.6, ...}
 ```
-
----
-
-## 🏠 Creare i sensori in Home Assistant
-
-Il modo più compatto è leggere **un solo topic** (`stato`) ed estrarre i valori con
-`value_template`. Aggiungi in `configuration.yaml` e riavvia Home Assistant.
-
-```yaml
-mqtt:
-  sensor:
-    - name: "Inverter PV Potenza"
-      unique_id: tbb_pv_w
-      state_topic: "tbb/inverter/stato"
-      value_template: "{{ value_json.pv_w }}"
-      unit_of_measurement: "W"
-      device_class: power
-      state_class: measurement
-
-    - name: "Inverter Batteria SOC"
-      unique_id: tbb_soc
-      state_topic: "tbb/inverter/stato"
-      value_template: "{{ value_json.soc }}"
-      unit_of_measurement: "%"
-      device_class: battery
-      state_class: measurement
-
-    - name: "Inverter Batteria Tensione"
-      unique_id: tbb_bat_v
-      state_topic: "tbb/inverter/stato"
-      value_template: "{{ value_json.bat_v }}"
-      unit_of_measurement: "V"
-      device_class: voltage
-      state_class: measurement
-
-    - name: "Inverter Batteria Corrente"
-      unique_id: tbb_bat_i
-      state_topic: "tbb/inverter/stato"
-      value_template: "{{ value_json.bat_i }}"
-      unit_of_measurement: "A"
-      device_class: current
-      state_class: measurement
-
-    - name: "Inverter Uscita AC Potenza"
-      unique_id: tbb_ac_out_w
-      state_topic: "tbb/inverter/stato"
-      value_template: "{{ value_json.ac_out_w }}"
-      unit_of_measurement: "W"
-      device_class: power
-      state_class: measurement
-
-    - name: "Inverter Temperatura Dissipatore"
-      unique_id: tbb_t_heatsink
-      state_topic: "tbb/inverter/stato"
-      value_template: "{{ value_json.t_heatsink }}"
-      unit_of_measurement: "°C"
-      device_class: temperature
-      state_class: measurement
-```
-
-Ripeti il blocco per le altre grandezze cambiando `name`, `unique_id`, la chiave in
-`value_template` e i `device_class` / `unit_of_measurement` secondo le tabelle
-sopra.
-
-### Device class da usare
-
-| Grandezza | `device_class` | `unit_of_measurement` |
-|---|---|---|
-| Potenze (`*_w`) | `power` | `W` |
-| Tensioni (`*_v`) | `voltage` | `V` |
-| Correnti (`*_i`) | `current` | `A` |
-| Temperature (`t_*`, `mppt_temp`) | `temperature` | `°C` |
-| `soc` | `battery` | `%` |
-| `ac_freq` | `frequency` | `Hz` |
-| `load_pct` | *(nessuna)* | `%` |
-
-### Sensore "direzione batteria"
-
-Comodo per le automazioni e le dashboard:
-
-```yaml
-template:
-  - sensor:
-      - name: "Inverter Stato Batteria"
-        state: >
-          {% set i = states('sensor.inverter_batteria_corrente') | float(0) %}
-          {% if i > 0.5 %}In carica
-          {% elif i < -0.5 %}In scarica
-          {% else %}A riposo{% endif %}
-        icon: >
-          {% set i = states('sensor.inverter_batteria_corrente') | float(0) %}
-          {% if i > 0.5 %}mdi:battery-charging
-          {% elif i < -0.5 %}mdi:battery-arrow-down
-          {% else %}mdi:battery{% endif %}
-```
-
----
-
-## ⚡ Energy Dashboard
-
-L'inverter riporta **potenze istantanee (W)**, mentre la Energy Dashboard vuole
-**energia cumulata (kWh)**. La conversione si fa con un helper di integrazione
-(somma di Riemann).
-
-**Impostazioni → Dispositivi e servizi → Helper → Crea helper → Integrale-Riemann**
-
-| Campo | Valore |
-|---|---|
-| Sensore in ingresso | `sensor.inverter_pv_potenza` |
-| Metodo di integrazione | Trapezoidale |
-| Prefisso metrico | `k` (kilo) |
-| Unità di tempo massima | Ore (h) |
-
-Ottieni `sensor.inverter_pv_potenza_integral` in kWh, da aggiungere nella Energy
-Dashboard come **Pannelli solari**. Ripeti il procedimento per l'uscita AC se vuoi
-tracciare anche i consumi.
-
----
-
-## 🎛️ Comandi di scrittura
-
-L'add-on è in ascolto su `<prefix>/cmd/#` e può **scrivere** nell'inverter.
-
-### SmartPort
-
-Imposta il livello della SmartPort (registro `0x005E`) da 0 a 100 %. L'add-on invia
-automaticamente la sequenza di sblocco richiesta dall'inverter.
-
-```yaml
-# Esempio di azione in un'automazione o in uno script
-action: mqtt.publish
-data:
-  topic: tbb/inverter/cmd/smart_port
-  payload: "40"
-```
-
-### Frame raw
-
-Invia un frame RS485 arbitrario, byte in esadecimale separati da spazi. **CRC
-incluso**: non viene calcolato dall'add-on.
-
-```yaml
-action: mqtt.publish
-data:
-  topic: tbb/inverter/cmd/raw
-  payload: "7E FF 11 06 06 0C 00 5E 00 28 81 46"
-```
-
-### Esito dei comandi
-
-Ogni comando pubblica il risultato su un topic dedicato:
-
-| Topic | Valori |
-|---|---|
-| `<prefix>/cmd/smart_port/status` | `OK` / `ERRORE` |
-| `<prefix>/cmd/raw/status` | `OK` / `ERRORE` |
-
-Nella scheda **Log** trovi il dettaglio di ogni frame trasmesso (`>> TX:`) e delle
-risposte ricevute (`<< RX:`).
-
-> ⚠️ **`cmd/raw` scrive direttamente nei registri dell'inverter.** Un frame
-> sbagliato può modificare parametri di funzionamento dell'impianto. Usalo solo se
-> hai la documentazione del registro che stai toccando, e non esporre il broker
-> MQTT su Internet senza autenticazione.
 
 ---
 
 ## 🛠️ Risoluzione problemi
 
-### Nel log compare `[!] Ciclo N: nessuna risposta`
+### Nel log compare `Ciclo N: nessuna risposta dall'inverter`
 
 L'add-on trasmette ma l'inverter non risponde.
 
@@ -342,39 +363,55 @@ L'add-on trasmette ma l'inverter non risponde.
 | **Porta corretta** | Se hai più device USB seriali, potresti aver puntato quello sbagliato: usa il percorso `by-id`. |
 | **Baudrate** | Deve restare `9600`. |
 
-### `[ERRORE] Impossibile aprire /dev/ttyUSB0`
+Imposta `log_level: debug` per vedere i byte effettivamente ricevuti: se non
+compare nessuna riga `RX`, il problema è nel cablaggio.
 
-La porta non esiste o è occupata.
+### `Impossibile aprire /dev/ttyUSB0`
 
-- Controlla che l'adattatore sia elencato: `ls -l /dev/serial/by-id/`
+La porta non esiste o è occupata. L'add-on riprova ogni 10 secondi, non serve
+riavviarlo a mano.
+
+- All'avvio il log elenca i dispositivi seriali disponibili: controlla che il tuo
+  compaia
 - Verifica che nessun'altra integrazione o add-on stia usando la stessa porta
   (Zigbee2MQTT, ZHA, ESPHome…)
-- Scollega e ricollega l'adattatore, poi riavvia l'add-on
+- Scollega e ricollega l'adattatore
 
-### `[!] MQTT errore connessione`
+### `Nessun broker MQTT disponibile`
 
-L'add-on prosegue in sola lettura locale (i valori compaiono nel log ma non in HA).
+L'add-on non parte perché non trova un broker.
 
-- Con Mosquitto come add-on, `mqtt_host` deve essere `core-mosquitto`
-- Le credenziali MQTT sono quelle di un **utente Home Assistant**, non del sistema
-- Con un broker esterno, verifica che la porta 1883 sia raggiungibile dall'host di HA
+- Installa l'add-on ufficiale **Mosquitto broker** e lascia `mqtt_host` vuoto
+- Oppure compila `mqtt_host`, `mqtt_port` e le credenziali del tuo broker esterno
 
-### I valori arrivano su MQTT ma non vedo i sensori
+### Non vedo il dispositivo in Home Assistant
 
-Home Assistant non crea i sensori da solo: vanno dichiarati in `configuration.yaml`
-come mostrato [sopra](#-creare-i-sensori-in-home-assistant). Dopo averli aggiunti,
-riavvia Home Assistant (non basta un ricaricamento della sola configurazione MQTT
-la prima volta).
+- Controlla che `mqtt_discovery` sia `true`
+- L'integrazione **MQTT** deve essere configurata in Home Assistant
+  (*Impostazioni → Dispositivi e servizi*)
+- Se hai cambiato `discovery_prefix`, deve coincidere con quello dell'integrazione
+- Riavvia l'add-on: i messaggi di discovery vengono ripubblicati ad ogni
+  connessione
 
-Per controllare che i messaggi arrivino davvero: **Impostazioni → Dispositivi e
-servizi → MQTT → Configura → Ascolta un argomento**, e sottoscrivi
-`tbb/inverter/#`.
+Per verificare che i messaggi arrivino: **Impostazioni → Dispositivi e servizi →
+MQTT → Configura → Ascolta un argomento**, e sottoscrivi `tbb/inverter/#`.
 
-### Alcuni valori restano a 0
+### Le entità risultano "non disponibili"
+
+Significa che l'add-on non sta leggendo dall'inverter: guarda il log, di solito è
+la porta seriale. È il comportamento voluto — meglio un buco nel grafico che un
+valore vecchio spacciato per attuale.
+
+### Alcuni valori non si aggiornano mai
 
 Le risposte dell'inverter possono essere più corte del previsto: i campi mancanti
-vengono pubblicati come `0`. Se un valore è stabilmente a zero mentre gli altri sono
-corretti, quel dato probabilmente non è esposto dal tuo modello o firmware.
+non vengono pubblicati. Se una grandezza resta ferma mentre le altre cambiano,
+probabilmente non è esposta dal tuo modello o firmware.
+
+### Riavvio automatico dopo un crash
+
+Nella pagina dell'add-on, attiva l'interruttore **Watchdog**: Home Assistant lo
+riavvierà da solo se dovesse terminare in modo inatteso.
 
 ---
 
@@ -389,7 +426,18 @@ L'add-on interroga ciclicamente due frame di lettura:
 
 I frame di scrittura seguono lo schema `7E FF 11 06 <cmd> 0C <reg_hi> <reg_lo>
 <val_hi> <val_lo> <crc_lo> <crc_hi>`, con **CRC16/MODBUS** (polinomio `0xA001`,
-init `0xFFFF`, little-endian).
+init `0xFFFF`, little-endian). Il byte in posizione 5 contiene la lunghezza
+totale del frame.
+
+Il CRC delle risposte viene verificato individuando il confine del frame: al
+primo frame validato il log riporta
+
+```
+[INFO] Verifica CRC delle risposte attiva (frame di N byte)
+```
+
+Se questa riga non compare mai, il CRC non è verificabile sul tuo firmware e
+l'add-on decodifica comunque (a meno che `strict_crc` sia attivo).
 
 > Il protocollo non è documentato dal produttore: è stato ricostruito per
 > osservazione. Modelli o firmware diversi possono avere offset differenti.
@@ -400,4 +448,5 @@ init `0xFFFF`, little-endian).
 
 Problemi, idee o registri decodificati da aggiungere?
 [Apri una issue su GitHub](https://github.com/CarloFalco/ha-tbb-inverter-addon/issues)
-allegando le righe di log rilevanti e il modello esatto del tuo inverter.
+allegando le righe di log rilevanti (con `log_level: debug`) e il modello esatto
+del tuo inverter.

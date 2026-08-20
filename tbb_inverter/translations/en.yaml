@@ -1,0 +1,58 @@
+configuration:
+  serial_port:
+    name: Serial port
+    description: >-
+      Path of the USB-RS485 adapter. Prefer a stable /dev/serial/by-id/... path:
+      /dev/ttyUSB0 can change across reboots.
+  baudrate:
+    name: Baud rate
+    description: RS485 line speed. The inverter uses 9600.
+  poll_interval:
+    name: Poll interval
+    description: >-
+      Seconds between two read cycles. 5 is a good trade-off; lower values mean
+      more database writes.
+  mqtt_host:
+    name: MQTT host
+    description: >-
+      Leave empty to use the MQTT broker configured in Home Assistant. Fill it
+      in only for an external broker.
+  mqtt_port:
+    name: MQTT port
+    description: Only used when the MQTT host is set.
+  mqtt_user:
+    name: MQTT username
+    description: Only used when the MQTT host is set.
+  mqtt_password:
+    name: MQTT password
+    description: Only used when the MQTT host is set.
+  mqtt_prefix:
+    name: Topic prefix
+    description: Prefix of every published topic and of the incoming commands.
+  mqtt_discovery:
+    name: Create entities automatically
+    description: >-
+      Publish MQTT Discovery messages: sensors and the SmartPort slider show up
+      on their own as a single device, no YAML required.
+  discovery_prefix:
+    name: Discovery prefix
+    description: >-
+      Change it only if you customised the discovery prefix of the MQTT
+      integration. Default: homeassistant.
+  allow_raw_command:
+    name: Allow raw RS485 frames
+    description: >-
+      Enables the cmd/raw topic, which writes straight into the inverter
+      registers. Keep it off unless you need it.
+  strict_crc:
+    name: Strict CRC check
+    description: >-
+      Drop responses whose CRC does not validate instead of decoding them
+      anyway. Turn it on once the log shows CRC verification works on your
+      inverter.
+  log_level:
+    name: Log level
+    description: >-
+      info prints the value table every cycle, notice only events, debug adds
+      the raw TX/RX hex frames.
+network: {}
