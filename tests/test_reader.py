@@ -91,7 +91,7 @@ d = T.decode_c0(c0)
 expected = {"ac_out_w": 1116, "ac_out_v": 230.2, "ac_out_i": 4.85, "ac_in_v": 231.0,
             "ac_in_i": -0.12, "ac_freq": 50.01, "bat_v": 53.412, "bat_i": 14.2,
             "soc": 87, "load_pct": 14, "t_heatsink": 38, "t_transformer": 44,
-            "t_inverter": 35, "t_bat": 21, "bat_status": "In carica"}
+            "t_inverter": 35, "t_bat": 21}
 for k, v in expected.items():
     check(f"decode_c0 {k} = {v}", abs(d[k] - v) < 1e-6 if isinstance(v, float) else d[k] == v,
           d.get(k))
@@ -101,8 +101,48 @@ short = T.decode_c0(c0[:60])
 check("frame corto: nessuno zero fittizio per soc", "soc" not in short, sorted(short))
 check("frame corto: i campi presenti restano corretti", short.get("bat_v") == 53.412)
 
-check("bat_status In scarica", T.decode_c0(
-    c0[:52] + (-142 & 0xFFFF).to_bytes(2, "big") + c0[54:])["bat_status"] == "In scarica")
+
+# ---------------------------------------------------------------- canali calcolati
+der = T.apply_derived(T.decode_c0(c0))
+check("bat_w = tensione x corrente batteria",
+      abs(der["bat_w"] - round(53.412 * 14.2, 1)) < 1e-9, der.get("bat_w"))
+check("bat_w e' positiva quando la batteria carica", der["bat_w"] > 0)
+check("ac_in_w = tensione x corrente di rete",
+      der["ac_in_w"] == round(231.0 * -0.12), der.get("ac_in_w"))
+check("ac_in_w e' negativa quando si preleva dalla rete", der["ac_in_w"] < 0)
+check("ac_out2_w = tensione x corrente uscita 2",
+      der["ac_out2_w"] == round(230.1 * 1.00), der.get("ac_out2_w"))
+check("ac_out_tot_w somma le due uscite",
+      der["ac_out_tot_w"] == der["ac_out_w"] + der["ac_out2_w"], der.get("ac_out_tot_w"))
+check("bat_status In carica", der["bat_status"] == "In carica")
+
+scarica = T.apply_derived(T.decode_c0(c0[:52] + (-142 & 0xFFFF).to_bytes(2, "big") + c0[54:]))
+check("bat_status In scarica", scarica["bat_status"] == "In scarica")
+check("bat_w e' negativa in scarica", scarica["bat_w"] < 0, scarica.get("bat_w"))
+
+riposo = T.apply_derived({"bat_v": 53.4, "bat_i": 0.0})
+check("bat_status A riposo con corrente nulla", riposo["bat_status"] == "A riposo")
+check("bat_w = 0 a riposo", riposo["bat_w"] == 0, riposo.get("bat_w"))
+
+# dipendenze mancanti -> il canale non viene inventato
+check("nessun bat_w senza la corrente di batteria",
+      "bat_w" not in T.apply_derived({"bat_v": 53.4}))
+check("nessun ac_out_tot_w con una sola uscita nota",
+      "ac_out_tot_w" not in T.apply_derived({"ac_out_w": 1116}))
+check("un frame corto non produce potenze fittizie",
+      "bat_w" not in T.apply_derived(T.decode_c0(c0[:40])), )
+check("apply_derived su un dizionario vuoto non solleva",
+      T.apply_derived({}) == {})
+
+# ac_out_tot_w dipende da ac_out2_w, a sua volta calcolato: l'ordine deve reggere
+catena = T.apply_derived({"ac_out_w": 1000, "ac_out2_v": 230.0, "ac_out2_i": 2.0})
+check("i canali calcolati possono dipendere l'uno dall'altro",
+      catena["ac_out_tot_w"] == 1000 + catena["ac_out2_w"], catena.get("ac_out_tot_w"))
+
+# ogni canale calcolato deve avere un'entita' in Home Assistant
+sensor_keys = {row[0] for row in T.SENSORS}
+mancanti = [k for k, _, _ in T.DERIVED if k not in sensor_keys]
+check("ogni canale calcolato ha la sua entita'", not mancanti, mancanti)
 
 
 # ---------------------------------------------------------------- seriale finta

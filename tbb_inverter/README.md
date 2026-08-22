@@ -5,7 +5,7 @@
 **Porta il tuo inverter TBB RiiO Sun II dentro Home Assistant.**
 Nessun cloud, nessun account, nessun gateway proprietario: solo un cavo RS485 e MQTT.
 
-![Version](https://img.shields.io/badge/versione-1.1.0-1f8fff?style=for-the-badge)
+![Version](https://img.shields.io/badge/versione-1.2.0-1f8fff?style=for-the-badge)
 ![Arch](https://img.shields.io/badge/arch-aarch64%20%7C%20amd64-5ce1e6?style=for-the-badge)
 ![Setup](https://img.shields.io/badge/YAML%20richiesto-nessuno-ffb020?style=for-the-badge)
 
@@ -20,9 +20,9 @@ per dashboard, automazioni, statistiche a lungo termine e Energy Dashboard.
 | | |
 |---|---|
 | ☀️ **Produzione fotovoltaica** | Tensione, corrente e potenza MPPT, temperatura del regolatore |
-| 🔋 **Batteria** | Tensione, corrente con segno, SOC, stato carica/scarica, temperatura, lettura BMS |
-| 🔌 **Uscite AC** | Due uscite indipendenti: V, A, W — più frequenza di rete e carico |
-| 🏠 **Ingresso rete** | Tensione e corrente con segno, per capire se stai prelevando o immettendo |
+| 🔋 **Batteria** | Tensione, corrente e **potenza** con segno, SOC, stato carica/scarica, temperatura, BMS |
+| 🔌 **Uscite AC** | Due uscite indipendenti: V, A, W, **totale** — più frequenza e carico |
+| 🏠 **Ingresso rete** | Tensione, corrente e **potenza** con segno: sai subito se prelevi o immetti |
 | 🌡️ **Temperature** | Dissipatore, trasformatore, stadio inverter, batteria |
 | 🎚️ **SmartPort** | Uno slider in Home Assistant per impostarla da 0 a 100 % |
 
@@ -55,6 +55,7 @@ sensori già configurati. Nessuno YAML da scrivere.
   AC Out:    230.2 V   4.85 A   1116 W
   AC In:     231.0 V   -0.12 A  (rete->inv)
   Batteria:   53.412 V  +14.2 A (In carica)  SOC  87%
+  Potenze:   Batteria    +758 W   Rete    -28 W   Uscite  1346 W
   Temp:      Heatsink  38°C  Transformer  44°C
   Carico:     14%
 -------------------------------------------------------
@@ -69,6 +70,8 @@ sensori già configurati. Nessuno YAML da scrivere.
   seriale — un buco nel grafico, non una linea piatta finta
 - 🔁 **Si riprende da solo**: adattatore USB scollegato o broker riavviato, l'add-on
   riconnette senza intervento
+- ⚙ **Canali calcolati**: potenza di batteria, di rete e uscita totale, ricavate
+  dalle letture ad ogni ciclo
 - 🕳️ **Nessuno zero fittizio**: se un dato non arriva, il sensore non viene aggiornato
 - 🔒 **Scritture grezze disattivate** per impostazione predefinita
 

@@ -9,6 +9,7 @@ Home Assistant.
 | [⚙️ Opzioni](#-opzioni-dellagg-on) | Tutti i parametri configurabili |
 | [🔗 Porta seriale stabile](#-porta-seriale-stabile) | Evitare che `/dev/ttyUSB0` cambi |
 | [🏠 Le entità in Home Assistant](#-le-entità-in-home-assistant) | Create da sole, senza YAML |
+| [⚙ Canali calcolati](#-canali-calcolati) | Potenze ricavate dalle letture |
 | [⚡ Energy Dashboard](#-energy-dashboard) | Da watt a kWh |
 | [🎛️ Comandi di scrittura](#-comandi-di-scrittura) | SmartPort e frame raw |
 | [📡 Topic MQTT](#-topic-mqtt) | Riferimento completo dei topic |
@@ -137,19 +138,23 @@ le entità già configurate:
 | Tensione batteria | V | `sensor.tbb_riio_sun_ii_bat_v` |
 | Tensione batteria BMS | V | `sensor.tbb_riio_sun_ii_bat_v_bms` |
 | Corrente batteria | A | `sensor.tbb_riio_sun_ii_bat_i` |
+| **Potenza batteria** ⚙ | W | `sensor.tbb_riio_sun_ii_bat_w` |
 | Stato di carica | % | `sensor.tbb_riio_sun_ii_soc` |
 | Stato batteria | — | `sensor.tbb_riio_sun_ii_bat_status` |
 | Temperatura batteria | °C | `sensor.tbb_riio_sun_ii_t_bat` |
 | Tensione / Corrente / Potenza uscita AC | V / A / W | `sensor.tbb_riio_sun_ii_ac_out_v` … |
 | Tensione / Corrente / Potenza uscita AC 2 | V / A / W | `sensor.tbb_riio_sun_ii_ac_out2_v` … |
+| **Potenza uscita AC totale** ⚙ | W | `sensor.tbb_riio_sun_ii_ac_out_tot_w` |
 | Frequenza uscita | Hz | `sensor.tbb_riio_sun_ii_ac_freq` |
 | Carico | % | `sensor.tbb_riio_sun_ii_load_pct` |
 | Tensione / Corrente rete | V / A | `sensor.tbb_riio_sun_ii_ac_in_v` … |
+| **Potenza rete** ⚙ | W | `sensor.tbb_riio_sun_ii_ac_in_w` |
 | Temperature dissipatore / trasformatore / inverter | °C | *(diagnostica)* |
 | **SmartPort** *(slider scrivibile)* | % | `number.tbb_riio_sun_ii_smart_port` |
 
-`bat_status` vale *In carica*, *In scarica* o *A riposo*, ricavato dal segno della
-corrente di batteria.
+Le voci con ⚙ sono [canali calcolati](#-canali-calcolati). `bat_status` vale
+*In carica*, *In scarica* o *A riposo*, ricavato dal segno della corrente di
+batteria.
 
 ### Disponibilità
 
@@ -204,6 +209,48 @@ usando questa corrispondenza:
 
 ---
 
+## ⚙ Canali calcolati
+
+Alcune entità non arrivano dall'inverter ma vengono ricavate dalle grandezze
+lette, ad ogni ciclo:
+
+| Entità | Calcolo | Come leggere il segno |
+|---|---|---|
+| `bat_w` — Potenza batteria | `bat_v` × `bat_i` | **positiva** = batteria in carica, **negativa** = in scarica |
+| `ac_in_w` — Potenza rete | `ac_in_v` × `ac_in_i` | **negativa** = stai prelevando dalla rete, **positiva** = stai immettendo |
+| `ac_out2_w` — Potenza uscita AC 2 | `ac_out2_v` × `ac_out2_i` | — |
+| `ac_out_tot_w` — Potenza uscita AC totale | `ac_out_w` + `ac_out2_w` | — |
+| `bat_status` — Stato batteria | segno di `bat_i` | *In carica* / *In scarica* / *A riposo* |
+
+Un canale calcolato compare **solo se tutti i suoi ingressi sono presenti** nel
+ciclo. Se una risposta arriva corta e manca la corrente di batteria, `bat_w` non
+viene aggiornato invece di crollare a zero.
+
+> ⚠️ **Precisione sui canali AC.** Sulla batteria, che è in continua, tensione ×
+> corrente dà la potenza reale in watt, esatta. Sui canali in alternata
+> (`ac_in_w`, `ac_out2_w`) lo stesso prodotto dà la **potenza apparente** (VA):
+> coincide con i watt solo se il fattore di potenza è vicino a 1. Con carichi
+> fortemente induttivi aspettati una sovrastima. `ac_out_w` invece è misurato
+> direttamente dall'inverter, quindi è potenza reale.
+
+### Aggiungerne altri
+
+Sono definiti in una sola tabella in `tbb_reader.py`:
+
+```python
+DERIVED = [
+    ("bat_w", ("bat_v", "bat_i"), lambda d: round(d["bat_v"] * d["bat_i"], 1)),
+    ...
+]
+```
+
+Ogni voce dichiara la chiave, le sue dipendenze e il calcolo. Le voci sono
+valutate in ordine, quindi un canale può dipendere da uno definito prima
+(`ac_out_tot_w` usa `ac_out2_w`). Aggiunta la riga, serve la voce corrispondente
+in `SENSORS` perché l'entità compaia in Home Assistant — un test lo verifica.
+
+---
+
 ## ⚡ Energy Dashboard
 
 L'inverter riporta **potenze istantanee (W)**, mentre la Energy Dashboard vuole
@@ -220,8 +267,8 @@ L'inverter riporta **potenze istantanee (W)**, mentre la Energy Dashboard vuole
 | Unità di tempo massima | Ore (h) |
 
 Ottieni un sensore in kWh da aggiungere nella Energy Dashboard come **Pannelli
-solari**. Ripeti il procedimento con `sensor.tbb_riio_sun_ii_ac_out_w` se vuoi
-tracciare anche i consumi.
+solari**. Ripeti il procedimento con `sensor.tbb_riio_sun_ii_ac_out_tot_w` se
+vuoi tracciare i consumi di entrambe le uscite.
 
 ---
 
@@ -306,6 +353,7 @@ corrispondente non viene aggiornato invece di finire a zero.
 | `bat_v` | V | Tensione di batteria misurata dall'inverter |
 | `bat_v_bms` | V | Tensione riportata dal BMS della batteria |
 | `bat_i` | A | Corrente di batteria **con segno**: positiva = carica, negativa = scarica |
+| `bat_w` ⚙ | W | Potenza di batteria **con segno**: `bat_v` × `bat_i` |
 | `bat_status` | — | *In carica* / *In scarica* / *A riposo* |
 | `soc` | % | Stato di carica |
 | `t_bat` | °C | Temperatura della batteria |
@@ -315,7 +363,8 @@ corrispondente non viene aggiornato invece di finire a zero.
 | Topic | Unità | Descrizione |
 |---|:---:|---|
 | `ac_out_v` / `ac_out_i` / `ac_out_w` | V / A / W | Prima uscita AC |
-| `ac_out2_v` / `ac_out2_i` / `ac_out2_w` | V / A / W | Seconda uscita AC (`ac_out2_w` è calcolato come V × A) |
+| `ac_out2_v` / `ac_out2_i` / `ac_out2_w` ⚙ | V / A / W | Seconda uscita AC (`ac_out2_w` è calcolato come V × A) |
+| `ac_out_tot_w` ⚙ | W | Potenza totale erogata: somma delle due uscite |
 | `ac_freq` | Hz | Frequenza di uscita |
 | `load_pct` | % | Carico rispetto alla potenza nominale |
 
@@ -325,6 +374,7 @@ corrispondente non viene aggiornato invece di finire a zero.
 |---|:---:|---|
 | `ac_in_v` | V | Tensione di rete |
 | `ac_in_i` | A | Corrente **con segno**: negativa = stai prelevando dalla rete, positiva = stai immettendo |
+| `ac_in_w` ⚙ | W | Potenza di rete **con segno**: `ac_in_v` × `ac_in_i` |
 
 ### 🌡️ Temperature interne
 

@@ -413,12 +413,6 @@ def decode_c0(frame: bytes) -> dict:
             d["load_pct"]      = frame[99]
         if n > 155:
             d["soc"]           = frame[155]
-        if "ac_out2_v" in d and "ac_out2_i" in d:
-            d["ac_out2_w"]     = round(d["ac_out2_v"] * d["ac_out2_i"])
-        if "bat_i" in d:
-            i = d["bat_i"]
-            d["bat_status"] = ("In carica" if i > 0.5 else
-                               "In scarica" if i < -0.5 else "A riposo")
     except IndexError as e:
         log.warning("Errore decode C0: %s", e)
     return d
@@ -445,6 +439,58 @@ def decode_c1(frame: bytes) -> dict:
 
 
 # ================================================================
+# Canali calcolati
+# ================================================================
+
+def _bat_status(d: dict) -> str:
+    i = d["bat_i"]
+    return "In carica" if i > 0.5 else "In scarica" if i < -0.5 else "A riposo"
+
+
+# (chiave, dipendenze, calcolo)
+#
+# Le voci vengono valutate in ordine e scrivono nello stesso dizionario, quindi
+# un canale calcolato puo' dipendere da uno definito piu' in alto (e' il caso di
+# ac_out_tot_w, che usa ac_out2_w).
+#
+# Nota sui segni: bat_i e ac_in_i sono con segno, quindi lo sono anche le
+# potenze derivate. bat_w positiva = batteria in carica; ac_in_w negativa =
+# energia prelevata dalla rete.
+DERIVED = [
+    ("bat_w",        ("bat_v", "bat_i"),
+     lambda d: round(d["bat_v"] * d["bat_i"], 1)),
+
+    ("ac_in_w",      ("ac_in_v", "ac_in_i"),
+     lambda d: round(d["ac_in_v"] * d["ac_in_i"])),
+
+    ("ac_out2_w",    ("ac_out2_v", "ac_out2_i"),
+     lambda d: round(d["ac_out2_v"] * d["ac_out2_i"])),
+
+    ("ac_out_tot_w", ("ac_out_w", "ac_out2_w"),
+     lambda d: round(d["ac_out_w"] + d["ac_out2_w"])),
+
+    ("bat_status",   ("bat_i",), _bat_status),
+]
+
+
+def apply_derived(data: dict) -> dict:
+    """
+    Aggiunge i canali calcolati a partire dalle grandezze lette.
+
+    Un canale viene prodotto solo se tutte le sue dipendenze sono presenti: se
+    un frame arriva corto e manca la corrente di batteria, `bat_w` semplicemente
+    non compare, invece di finire a zero.
+    """
+    for key, deps, compute in DERIVED:
+        if all(dep in data for dep in deps):
+            try:
+                data[key] = compute(data)
+            except (TypeError, ValueError) as e:
+                log.warning("Errore nel calcolo di %s: %s", key, e)
+    return data
+
+
+# ================================================================
 # MQTT Discovery
 # ================================================================
 
@@ -458,6 +504,7 @@ SENSORS = [
     ("bat_v",         "Tensione batteria",        "V",   "voltage",     "measurement", None,             3, False),
     ("bat_v_bms",     "Tensione batteria BMS",    "V",   "voltage",     "measurement", None,             3, True),
     ("bat_i",         "Corrente batteria",        "A",   "current",     "measurement", None,             1, False),
+    ("bat_w",         "Potenza batteria",         "W",   "power",       "measurement", None,             0, False),
     ("soc",           "Stato di carica",          "%",   "battery",     "measurement", None,             0, False),
     ("t_bat",         "Temperatura batteria",     "°C",  "temperature", "measurement", None,             0, False),
     ("bat_status",    "Stato batteria",           None,  None,          None,          "mdi:battery",  None, False),
@@ -468,11 +515,13 @@ SENSORS = [
     ("ac_out2_v",     "Tensione uscita AC 2",     "V",   "voltage",     "measurement", None,             1, False),
     ("ac_out2_i",     "Corrente uscita AC 2",     "A",   "current",     "measurement", None,             2, False),
     ("ac_out2_w",     "Potenza uscita AC 2",      "W",   "power",       "measurement", None,             0, False),
+    ("ac_out_tot_w",  "Potenza uscita AC totale", "W",   "power",       "measurement", None,             0, False),
     ("ac_freq",       "Frequenza uscita",         "Hz",  "frequency",   "measurement", None,             2, False),
     ("load_pct",      "Carico",                   "%",   None,          "measurement", "mdi:gauge",      0, False),
 
     ("ac_in_v",       "Tensione rete",            "V",   "voltage",     "measurement", None,             1, False),
     ("ac_in_i",       "Corrente rete",            "A",   "current",     "measurement", None,             2, False),
+    ("ac_in_w",       "Potenza rete",             "W",   "power",       "measurement", None,             0, False),
 
     ("t_heatsink",    "Temperatura dissipatore",  "°C",  "temperature", "measurement", None,             0, True),
     ("t_transformer", "Temperatura trasformatore", "°C", "temperature", "measurement", None,             0, True),
@@ -719,6 +768,9 @@ def log_data(data: dict, cycle: int):
         (f"  Batteria:  {_fmt(g('bat_v'), '6.3f')} V  {_fmt(g('bat_i'), '+6.1f')} A "
          f"({g('bat_status', '--')})  SOC {_fmt(g('soc'), '3')}%"),
         f"  BAT BMS:   {_fmt(g('bat_v_bms'), '.3f')} V",
+        (f"  Potenze:   Batteria {_fmt(g('bat_w'), '+7.0f')} W   "
+         f"Rete {_fmt(g('ac_in_w'), '+6.0f')} W   "
+         f"Uscite {_fmt(g('ac_out_tot_w'), '5.0f')} W"),
         (f"  Temp:      Heatsink {_fmt(g('t_heatsink'), '3')}°C  "
          f"Transformer {_fmt(g('t_transformer'), '3')}°C  "
          f"Inverter {_fmt(g('t_inverter'), '3')}°C  BAT {_fmt(g('t_bat'), '3')}°C"),
@@ -755,7 +807,7 @@ def poll_once(ser: serial.Serial) -> dict:
         data.update(decode_c0(fc0))
     if fc1:
         data.update(decode_c1(fc1))
-    return data
+    return apply_derived(data)
 
 
 def main():

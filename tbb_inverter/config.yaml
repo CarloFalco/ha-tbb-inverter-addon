@@ -1,5 +1,5 @@
 name: "TBB Inverter Reader"
-version: "1.1.0"
+version: "1.2.0"
 slug: "tbb_inverter"
 description: "Lettura e controllo via RS485/MQTT dell'inverter TBB RiiO Sun II, con creazione automatica delle entita' in Home Assistant"
 url: "https://github.com/CarloFalco/ha-tbb-inverter-addon/tree/main/tbb_inverter"

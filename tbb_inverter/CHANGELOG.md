@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.2.0
+
+### ✨ Novità
+
+- **Canali calcolati.** Nuove entità ricavate dalle grandezze lette, create
+  automaticamente come tutte le altre:
+
+  | Entità | Calcolo | Segno |
+  |---|---|---|
+  | **Potenza batteria** (`bat_w`) | tensione × corrente di batteria | positiva = in carica |
+  | **Potenza rete** (`ac_in_w`) | tensione × corrente di rete | negativa = prelievo dalla rete |
+  | **Potenza uscita AC totale** (`ac_out_tot_w`) | somma delle due uscite | — |
+
+  Un canale calcolato viene pubblicato solo se tutti i suoi ingressi sono
+  presenti: se un frame arriva corto, `bat_w` non compare invece di finire a
+  zero.
+- Il riepilogo nel log mostra una riga **Potenze** con batteria, rete e uscite.
+
+### 🔧 Sviluppo
+
+- I valori derivati (`ac_out2_w` e `bat_status`, già presenti) sono stati
+  spostati nello stesso meccanismo dichiarativo `DERIVED`: aggiungere un canale
+  significa ora aggiungere una riga e la sua entità.
+- Un test verifica che ogni canale calcolato abbia la propria entità in Home
+  Assistant, così non se ne può aggiungere uno dimenticando di esporlo.
+
 ## 1.1.0
 
 ### ✨ Novità
