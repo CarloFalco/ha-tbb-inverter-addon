@@ -5,6 +5,7 @@ set -e
 export SERIAL_PORT BAUD POLL_INTERVAL
 export MQTT_HOST MQTT_PORT MQTT_USER MQTT_PASS MQTT_PREFIX
 export MQTT_DISCOVERY DISCOVERY_PREFIX ALLOW_RAW_COMMAND STRICT_CRC
+export SMARTPORT_MIN_A SMARTPORT_MAX_A SMARTPORT_VOLTAGE
 export LOG_LEVEL ADDON_VERSION
 
 SERIAL_PORT=$(bashio::config 'serial_port')
@@ -15,6 +16,9 @@ MQTT_DISCOVERY=$(bashio::config 'mqtt_discovery')
 DISCOVERY_PREFIX=$(bashio::config 'discovery_prefix')
 ALLOW_RAW_COMMAND=$(bashio::config 'allow_raw_command')
 STRICT_CRC=$(bashio::config 'strict_crc')
+SMARTPORT_MIN_A=$(bashio::config 'smartport_min_a')
+SMARTPORT_MAX_A=$(bashio::config 'smartport_max_a')
+SMARTPORT_VOLTAGE=$(bashio::config 'smartport_voltage')
 LOG_LEVEL=$(bashio::config 'log_level')
 # ADDON_VERSION arriva gia' dal Dockerfile (BUILD_VERSION); l'API del Supervisor
 # e' solo un raffinamento e non deve far fallire l'avvio se non risponde.
@@ -59,5 +63,6 @@ fi
 bashio::log.info "Avvio TBB Inverter Reader ${ADDON_VERSION}"
 bashio::log.info "Porta seriale: ${SERIAL_PORT}  Baud: ${BAUD}  Poll: ${POLL_INTERVAL}s"
 bashio::log.info "Prefix MQTT: ${MQTT_PREFIX}  Discovery: ${MQTT_DISCOVERY}"
+bashio::log.info "SmartPort: ${SMARTPORT_MIN_A}-${SMARTPORT_MAX_A} A a ${SMARTPORT_VOLTAGE} V nominali"
 
 exec python3 -u /tbb_reader.py

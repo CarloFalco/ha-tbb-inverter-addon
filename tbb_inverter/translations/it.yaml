@@ -50,6 +50,21 @@ configuration:
       Scarta le risposte il cui CRC non e' valido invece di provare comunque a
       decodificarle. Attivalo solo dopo aver visto nel log che la verifica CRC
       funziona sul tuo inverter.
+  smartport_min_a:
+    name: SmartPort - corrente minima
+    description: >-
+      Estremo inferiore ammesso dall'inverter per la SmartPort, in ampere.
+      Sul RiiO Sun II sono 5 A.
+  smartport_max_a:
+    name: SmartPort - corrente massima
+    description: >-
+      Estremo superiore ammesso dall'inverter per la SmartPort, in ampere.
+      Sul RiiO Sun II sono 32 A.
+  smartport_voltage:
+    name: SmartPort - tensione nominale
+    description: >-
+      Tensione usata per convertire gli ampere in watt nello slider in W.
+      Fissa e non misurata, cosi' il valore impostato resta stabile.
   log_level:
     name: Livello di log
     description: >-

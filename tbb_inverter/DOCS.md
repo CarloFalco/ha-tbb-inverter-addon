@@ -80,6 +80,9 @@ flusso.
 | `discovery_prefix` | `homeassistant` | Cambialo solo se hai personalizzato il prefisso di discovery dell'integrazione MQTT. |
 | `allow_raw_command` | `false` | Abilita il topic `cmd/raw`. Vedi [l'avviso](#frame-raw). |
 | `strict_crc` | `false` | Scarta le risposte con CRC non valido invece di provare comunque a decodificarle. |
+| `smartport_min_a` | `5` | Corrente minima ammessa dall'inverter per la SmartPort. |
+| `smartport_max_a` | `32` | Corrente massima ammessa dall'inverter per la SmartPort. |
+| `smartport_voltage` | `230` | Tensione usata per convertire ampere in watt nello slider in W. |
 | `log_level` | `info` | `info` stampa la tabella dei valori ad ogni ciclo, `notice` solo gli eventi, `debug` aggiunge i frame esadecimali TX/RX. |
 
 ### Ogni quanto interrogare?
@@ -151,7 +154,9 @@ le entità già configurate:
 | Tensione / Corrente rete | V / A | `sensor.tbb_riio_sun_ii_ac_in_v` … |
 | **Potenza rete** ⚙ | W | `sensor.tbb_riio_sun_ii_ac_in_w` |
 | Temperature dissipatore / trasformatore / inverter | °C | *(diagnostica)* |
-| **SmartPort** *(slider scrivibile)* | % | `number.tbb_riio_sun_ii_smart_port` |
+| **SmartPort corrente** *(scrivibile)* | A | `number.tbb_riio_sun_ii_smart_port_a` |
+| **SmartPort potenza** *(scrivibile)* | W | `number.tbb_riio_sun_ii_smart_port_w` |
+| **SmartPort percentuale** *(scrivibile)* | % | `number.tbb_riio_sun_ii_smart_port` |
 
 Le voci con ⚙ sono [canali calcolati](#-canali-calcolati). `bat_status` vale
 *In carica*, *In scarica* o *A riposo*, ricavato dal segno della corrente di
@@ -275,30 +280,65 @@ vuoi tracciare i consumi di entrambe le uscite.
 
 ## 🎛️ Comandi di scrittura
 
-### SmartPort
+### SmartPort: tre slider, un solo valore
 
-Il modo più semplice è lo **slider** creato da discovery
-(`number.tbb_riio_sun_ii_smart_port`): trascinalo, oppure usalo in un'automazione.
+Il registro `0x005E` dell'inverter contiene una **corrente in ampere**, con un
+intervallo utile di **5-32 A**. Per comodità l'add-on la espone in tre unità
+diverse, con tre entità scrivibili:
+
+| Entità | Unità | Intervallo | Passo |
+|---|:---:|---|---|
+| `number.tbb_riio_sun_ii_smart_port_a` | A | 5 → 32 | 1 A |
+| `number.tbb_riio_sun_ii_smart_port_w` | W | 1150 → 7360 | 230 W (= 1 A) |
+| `number.tbb_riio_sun_ii_smart_port` | % | 0 → 100 | 1 % |
+
+**Sono tre viste della stessa cosa.** Scrivendone una, le altre due si
+aggiornano da sole: non sono impostazioni indipendenti. La percentuale è
+riferita all'intervallo utile, quindi `0 %` significa 5 A e non 0 A.
+
+Per le automazioni conviene quella in ampere o in watt:
 
 ```yaml
 action: number.set_value
 target:
-  entity_id: number.tbb_riio_sun_ii_smart_port
+  entity_id: number.tbb_riio_sun_ii_smart_port_a
 data:
-  value: 40
+  value: 16
 ```
 
-In alternativa, direttamente su MQTT:
+In alternativa, direttamente su MQTT — un topic per unità:
 
 ```yaml
 action: mqtt.publish
 data:
-  topic: tbb/inverter/cmd/smart_port
-  payload: "40"
+  topic: tbb/inverter/cmd/smart_port_a
+  payload: "16"
 ```
 
-L'add-on invia automaticamente la sequenza di sblocco richiesta dall'inverter
-prima di scrivere il registro `0x005E`.
+L'add-on converte in ampere, verifica che il valore sia nell'intervallo, invia
+la sequenza di sblocco richiesta dall'inverter e scrive il registro `0x005E`.
+Un valore fuori scala viene rifiutato senza toccare l'inverter.
+
+> **Sulla conversione in watt.** Usa la tensione nominale dell'opzione
+> `smartport_voltage` (230 V), non quella misurata istante per istante: così il
+> valore che imposti resta quello che rileggi, invece di ballare con la rete.
+> È una corrente limite espressa in watt, non una misura di potenza.
+
+> **Se la tua SmartPort ha un intervallo diverso** da 5-32 A, correggilo con le
+> opzioni `smartport_min_a` e `smartport_max_a`: i tre slider si riadattano da
+> soli, senza modifiche al codice.
+
+#### Verifica consigliata al primo utilizzo
+
+Imposta lo slider in ampere su un valore noto — per esempio **16 A** — e
+controlla che l'inverter mostri lo stesso valore sul proprio display. Se non
+coincide, l'intervallo configurato non corrisponde a quello del tuo firmware.
+
+> ℹ️ Una nota di trasparenza: il frame di esempio raccolto durante il reverse
+> engineering (`... 00 5E 00 28 ...`) scrive **40** nel registro, un valore
+> fuori dall'intervallo 5-32 A. O quel frame non era una scrittura SmartPort, o
+> su alcuni firmware la scala è diversa. È il motivo per cui gli estremi sono
+> configurabili e per cui vale la pena fare la verifica qui sopra.
 
 ### Frame raw
 
@@ -324,6 +364,8 @@ data:
 | Topic | Valori |
 |---|---|
 | `<prefix>/cmd/smart_port/status` | `OK` / `ERRORE` |
+| `<prefix>/cmd/smart_port_a/status` | `OK` / `ERRORE` |
+| `<prefix>/cmd/smart_port_w/status` | `OK` / `ERRORE` |
 | `<prefix>/cmd/raw/status` | `OK` / `ERRORE` |
 
 Con `log_level: debug` la scheda **Log** mostra il dettaglio di ogni frame
@@ -391,7 +433,7 @@ corrispondente non viene aggiornato invece di finire a zero.
 |---|---|
 | `stato` | JSON con tutte le grandezze lette nell'ultimo ciclo |
 | `availability` | `online` / `offline` — usato da tutte le entità |
-| `smart_port` | Ultimo valore SmartPort impostato con successo |
+| `smart_port` / `smart_port_a` / `smart_port_w` | Ultimo valore SmartPort impostato, nelle tre unità |
 
 ```json
 {"ac_out_w": 1116, "ac_out_v": 230.2, "bat_v": 53.412, "bat_i": 14.2,

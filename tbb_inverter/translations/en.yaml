@@ -50,6 +50,21 @@ configuration:
       Drop responses whose CRC does not validate instead of decoding them
       anyway. Turn it on once the log shows CRC verification works on your
       inverter.
+  smartport_min_a:
+    name: SmartPort - minimum current
+    description: >-
+      Lowest current the inverter accepts for SmartPort, in amperes. The
+      RiiO Sun II uses 5 A.
+  smartport_max_a:
+    name: SmartPort - maximum current
+    description: >-
+      Highest current the inverter accepts for SmartPort, in amperes. The
+      RiiO Sun II uses 32 A.
+  smartport_voltage:
+    name: SmartPort - nominal voltage
+    description: >-
+      Voltage used to convert amperes into watts for the W slider. Fixed
+      rather than measured, so the value you set stays stable.
   log_level:
     name: Log level
     description: >-

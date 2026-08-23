@@ -10,7 +10,10 @@ Connessione:
   RJ45 pin 8 (GND)          -> GND adattatore (opzionale)
 
 Comandi MQTT in ingresso (topic <prefix>/cmd/...):
-  <prefix>/cmd/smart_port   <- valore 0-100 (%)
+  <prefix>/cmd/smart_port     <- percentuale 0-100 dell'intervallo utile
+  <prefix>/cmd/smart_port_a   <- corrente in ampere (5-32 per impostazione predefinita)
+  <prefix>/cmd/smart_port_w   <- potenza in watt alla tensione nominale
+                                 Tutti e tre scrivono lo stesso registro 0x005E.
   <prefix>/cmd/raw          <- frame hex es. "7E FF 11 06 06 0C 00 5E 00 28 81 46"
                                (solo se allow_raw_command e' abilitato)
 
@@ -62,6 +65,11 @@ MQTT_KEEPALIVE = 60
 DISCOVERY         = _env_bool("MQTT_DISCOVERY", True)
 DISCOVERY_PREFIX  = os.environ.get("DISCOVERY_PREFIX", "homeassistant").strip("/")
 ALLOW_RAW_COMMAND = _env_bool("ALLOW_RAW_COMMAND", False)
+
+# SmartPort: il registro 0x005E contiene direttamente gli ampere.
+SMARTPORT_MIN_A   = _env_int("SMARTPORT_MIN_A", 5)
+SMARTPORT_MAX_A   = _env_int("SMARTPORT_MAX_A", 32)
+SMARTPORT_VOLTAGE = _env_int("SMARTPORT_VOLTAGE", 230)
 STRICT_CRC        = _env_bool("STRICT_CRC", False)
 LOG_LEVEL         = os.environ.get("LOG_LEVEL", "info").strip().lower()
 ADDON_VERSION     = os.environ.get("ADDON_VERSION", "dev")
@@ -69,9 +77,15 @@ ADDON_VERSION     = os.environ.get("ADDON_VERSION", "dev")
 # Topic derivati
 T_AVAILABILITY = f"{MQTT_PREFIX}/availability"
 T_STATE_JSON   = f"{MQTT_PREFIX}/stato"
-T_CMD_SMART    = f"{MQTT_PREFIX}/cmd/smart_port"
 T_CMD_RAW      = f"{MQTT_PREFIX}/cmd/raw"
+
+# Tre modi di scrivere lo stesso registro: percentuale, ampere, watt.
+T_CMD_SMART    = f"{MQTT_PREFIX}/cmd/smart_port"
+T_CMD_SMART_A  = f"{MQTT_PREFIX}/cmd/smart_port_a"
+T_CMD_SMART_W  = f"{MQTT_PREFIX}/cmd/smart_port_w"
 T_SMART_STATE  = f"{MQTT_PREFIX}/smart_port"
+T_SMART_STATE_A = f"{MQTT_PREFIX}/smart_port_a"
+T_SMART_STATE_W = f"{MQTT_PREFIX}/smart_port_w"
 
 DEVICE_ID = "tbb_riio_sun_ii"
 
@@ -363,26 +377,62 @@ def send_write_sequence(frames: list[bytes], delay: float = 0.2) -> bool:
 # Comandi inverter
 # ================================================================
 
-def cmd_smart_port(value: int) -> bool:
+def _smartport_span() -> int:
+    """Ampiezza dell'intervallo utile, mai zero."""
+    return max(1, SMARTPORT_MAX_A - SMARTPORT_MIN_A)
+
+
+def amps_to_pct(amps: float) -> int:
+    """Ampere -> percentuale dell'intervallo utile (min = 0 %, max = 100 %)."""
+    return round((amps - SMARTPORT_MIN_A) * 100 / _smartport_span())
+
+
+def pct_to_amps(pct: float) -> int:
+    """Percentuale dell'intervallo utile -> ampere."""
+    return round(SMARTPORT_MIN_A + pct * _smartport_span() / 100)
+
+
+def amps_to_watt(amps: float) -> int:
+    """Ampere -> watt alla tensione nominale configurata."""
+    return round(amps * SMARTPORT_VOLTAGE)
+
+
+def watt_to_amps(watt: float) -> int:
+    """Watt -> ampere alla tensione nominale configurata."""
+    return round(watt / SMARTPORT_VOLTAGE)
+
+
+def cmd_smart_port(amps: int) -> bool:
     """
-    Imposta il valore SmartPort (registro 0x005E).
-    value = percentuale 0-100
-    Sequenza: sblocco reg 0x73, sblocco reg 0x74, scrittura reg 0x5E
+    Imposta il valore SmartPort scrivendo il registro 0x005E.
+
+    Il registro contiene direttamente la **corrente in ampere**: le entita' in
+    watt e in percentuale sono solo modi diversi di esprimere lo stesso valore
+    e vengono convertite prima di arrivare qui.
+
+    Sequenza: sblocco reg 0x73, sblocco reg 0x74, scrittura reg 0x5E.
     """
-    if not 0 <= value <= 100:
-        log.warning("Valore SmartPort non valido: %s (deve essere 0-100)", value)
+    if not SMARTPORT_MIN_A <= amps <= SMARTPORT_MAX_A:
+        log.warning("Valore SmartPort non valido: %s A (ammessi %d-%d A)",
+                    amps, SMARTPORT_MIN_A, SMARTPORT_MAX_A)
         return False
 
-    log.log(25, "Impostazione SmartPort = %d%%", value)
+    log.log(25, "Impostazione SmartPort = %d A (%d W, %d%%)",
+            amps, amps_to_watt(amps), amps_to_pct(amps))
     frames = [
         build_frame(0x66, 0x0073, 0x000A),  # sblocco 1
         build_frame(0x66, 0x0074, 0x000A),  # sblocco 2
-        build_frame(0x06, 0x005E, value),   # scrittura SmartPort
+        build_frame(0x06, 0x005E, amps),    # scrittura SmartPort
     ]
     if not send_write_sequence(frames):
         return False
+
+    # Le tre entita' descrivono lo stesso registro: dopo una scrittura vanno
+    # aggiornate tutte, da qualunque delle tre sia arrivato il comando.
     if mqtt_client is not None:
-        mqtt_client.publish(T_SMART_STATE, value, retain=True)
+        mqtt_client.publish(T_SMART_STATE, amps_to_pct(amps), retain=True)
+        mqtt_client.publish(T_SMART_STATE_A, amps, retain=True)
+        mqtt_client.publish(T_SMART_STATE_W, amps_to_watt(amps), retain=True)
     return True
 
 
@@ -627,25 +677,41 @@ def discovery_payloads() -> list[tuple[str, dict]]:
             payload["entity_category"] = "diagnostic"
         items.append((f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/{key}/config", payload))
 
-    # SmartPort come slider scrivibile
-    items.append((
-        f"{DISCOVERY_PREFIX}/number/{DEVICE_ID}/smart_port/config",
-        {
-            "name": "SmartPort",
-            "unique_id": f"{DEVICE_ID}_smart_port",
-            "object_id": f"{DEVICE_ID}_smart_port",
-            "command_topic": T_CMD_SMART,
-            "state_topic": T_SMART_STATE,
-            "availability_topic": T_AVAILABILITY,
-            "min": 0, "max": 100, "step": 1,
-            "unit_of_measurement": "%",
-            "mode": "slider",
-            "icon": "mdi:transmission-tower",
-            "entity_category": "config",
-            "device": _device_block(),
-            "origin": _origin_block(),
-        },
-    ))
+    # SmartPort: tre slider che scrivono lo stesso registro, in unita' diverse.
+    # chiave, nome, unita', comando, stato, min, max, passo, icona
+    smartport = [
+        ("smart_port_a", "SmartPort corrente", "A",
+         T_CMD_SMART_A, T_SMART_STATE_A,
+         SMARTPORT_MIN_A, SMARTPORT_MAX_A, 1, "mdi:current-ac"),
+
+        ("smart_port_w", "SmartPort potenza", "W",
+         T_CMD_SMART_W, T_SMART_STATE_W,
+         amps_to_watt(SMARTPORT_MIN_A), amps_to_watt(SMARTPORT_MAX_A),
+         SMARTPORT_VOLTAGE, "mdi:flash"),
+
+        ("smart_port", "SmartPort percentuale", "%",
+         T_CMD_SMART, T_SMART_STATE,
+         0, 100, 1, "mdi:transmission-tower"),
+    ]
+    for key, name, unit, cmd_t, stat_t, minimo, massimo, passo, icon in smartport:
+        items.append((
+            f"{DISCOVERY_PREFIX}/number/{DEVICE_ID}/{key}/config",
+            {
+                "name": name,
+                "unique_id": f"{DEVICE_ID}_{key}",
+                "object_id": f"{DEVICE_ID}_{key}",
+                "command_topic": cmd_t,
+                "state_topic": stat_t,
+                "availability_topic": T_AVAILABILITY,
+                "min": minimo, "max": massimo, "step": passo,
+                "unit_of_measurement": unit,
+                "mode": "slider",
+                "icon": icon,
+                "entity_category": "config",
+                "device": _device_block(),
+                "origin": _origin_block(),
+            },
+        ))
     return items
 
 
@@ -672,6 +738,16 @@ def publish_discovery(client: mqtt.Client, enabled: bool):
 # ================================================================
 # MQTT
 # ================================================================
+
+# topic -> (unita', limiti ammessi, conversione in ampere).
+# I limiti sono funzioni perche' dipendono dalle opzioni lette all'avvio.
+SMARTPORT_COMMANDS = {
+    T_CMD_SMART:   ("%", lambda: (0, 100), pct_to_amps),
+    T_CMD_SMART_A: ("A", lambda: (SMARTPORT_MIN_A, SMARTPORT_MAX_A), round),
+    T_CMD_SMART_W: ("W", lambda: (amps_to_watt(SMARTPORT_MIN_A),
+                                  amps_to_watt(SMARTPORT_MAX_A)), watt_to_amps),
+}
+
 
 def _rc_failed(reason_code) -> bool:
     """True se il reason code MQTT indica un errore (paho 2.x o int)."""
@@ -717,8 +793,9 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
     # Le sottoscrizioni vanno rifatte ad ogni connessione: dopo un riavvio del
     # broker una subscribe fatta una volta sola all'avvio andrebbe persa.
-    client.subscribe([(T_CMD_SMART, 0), (T_CMD_RAW, 0)])
-    log.debug("Sottoscritto a %s e %s", T_CMD_SMART, T_CMD_RAW)
+    topics = [(t, 0) for t in SMARTPORT_COMMANDS] + [(T_CMD_RAW, 0)]
+    client.subscribe(topics)
+    log.debug("Sottoscritto a: %s", ", ".join(t for t, _ in topics))
 
     publish_discovery(client, DISCOVERY)
 
@@ -740,16 +817,28 @@ def on_message(client, userdata, msg):
         payload = msg.payload.decode("utf-8", errors="replace").strip()
         log.log(25, "Comando ricevuto: %s = %s", msg.topic, payload)
 
-        if msg.topic == T_CMD_SMART:
+        if msg.topic in SMARTPORT_COMMANDS:
+            unita, limiti, in_ampere = SMARTPORT_COMMANDS[msg.topic]
             try:
                 # OverflowError copre "inf": round() non sa convertirlo.
-                value = round(float(payload))
+                valore = float(payload)
+                if valore != valore:          # NaN
+                    raise ValueError("NaN")
+                round(valore)
             except (ValueError, OverflowError):
                 log.warning("Valore SmartPort non numerico: %r", payload)
-                client.publish(f"{T_CMD_SMART}/status", "ERRORE")
+                client.publish(f"{msg.topic}/status", "ERRORE")
                 return
-            ok = cmd_smart_port(value)
-            client.publish(f"{T_CMD_SMART}/status", "OK" if ok else "ERRORE")
+
+            minimo, massimo = limiti()
+            if not minimo <= valore <= massimo:
+                log.warning("Valore SmartPort fuori scala: %s %s (ammessi %s-%s %s)",
+                            valore, unita, minimo, massimo, unita)
+                client.publish(f"{msg.topic}/status", "ERRORE")
+                return
+
+            ok = cmd_smart_port(in_ampere(valore))
+            client.publish(f"{msg.topic}/status", "OK" if ok else "ERRORE")
 
         elif msg.topic == T_CMD_RAW:
             ok = cmd_raw(payload)
@@ -834,6 +923,29 @@ def log_data(data: dict, cycle: int):
 # Main
 # ================================================================
 
+def validate_smartport_config():
+    """
+    Controlla i limiti SmartPort presi dalle opzioni.
+
+    Un intervallo invertito o una tensione nulla produrrebbero entita' con
+    min >= max, che Home Assistant rifiuta, e divisioni per zero nelle
+    conversioni: meglio tornare ai valori predefiniti segnalandolo.
+    """
+    global SMARTPORT_MIN_A, SMARTPORT_MAX_A, SMARTPORT_VOLTAGE
+
+    if SMARTPORT_MIN_A >= SMARTPORT_MAX_A:
+        log.warning("Intervallo SmartPort non valido (%d-%d A): uso 5-32 A",
+                    SMARTPORT_MIN_A, SMARTPORT_MAX_A)
+        SMARTPORT_MIN_A, SMARTPORT_MAX_A = 5, 32
+    if SMARTPORT_MIN_A < 0 or SMARTPORT_MAX_A > 0xFFFF:
+        log.warning("Intervallo SmartPort fuori dai limiti del registro: uso 5-32 A")
+        SMARTPORT_MIN_A, SMARTPORT_MAX_A = 5, 32
+    if SMARTPORT_VOLTAGE <= 0:
+        log.warning("Tensione nominale SmartPort non valida (%d V): uso 230 V",
+                    SMARTPORT_VOLTAGE)
+        SMARTPORT_VOLTAGE = 230
+
+
 def banner():
     log.info("=" * 55)
     log.info("  TBB RiiO Sun II -- Reader %s (Home Assistant Add-on)", ADDON_VERSION)
@@ -842,8 +954,12 @@ def banner():
     log.info("  MQTT:      %s:%d  (prefix: %s)", MQTT_HOST, MQTT_PORT, MQTT_PREFIX)
     log.info("  Polling:   ogni %ds", POLL_INTERVAL)
     log.info("  Discovery: %s", "abilitato" if DISCOVERY else "disabilitato")
-    log.info("  Comandi:   %s  |  raw %s",
-             T_CMD_SMART, "abilitato" if ALLOW_RAW_COMMAND else "disabilitato")
+    log.info("  SmartPort: %d-%d A  (%d-%d W a %d V nominali)",
+             SMARTPORT_MIN_A, SMARTPORT_MAX_A,
+             amps_to_watt(SMARTPORT_MIN_A), amps_to_watt(SMARTPORT_MAX_A),
+             SMARTPORT_VOLTAGE)
+    log.info("  Comandi:   %s/cmd/smart_port[_a|_w]  |  raw %s",
+             MQTT_PREFIX, "abilitato" if ALLOW_RAW_COMMAND else "disabilitato")
     log.info("=" * 55)
 
 
@@ -864,6 +980,7 @@ def poll_once(ser: serial.Serial) -> dict:
 def main():
     global ser_global, mqtt_client
 
+    validate_smartport_config()
     banner()
     mqtt_client = setup_mqtt()
 

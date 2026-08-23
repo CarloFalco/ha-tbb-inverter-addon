@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.3.0
+
+### ⚠ Cambiamento importante: la SmartPort è in ampere
+
+Il registro `0x005E` contiene **la corrente in ampere**, non una percentuale.
+Lo slider precedente, con scala 0-100 %, scriveva quindi il valore grezzo nel
+registro: impostare "40 %" significava scrivere **40 A**, fuori
+dall'intervallo utile di 5-32 A dell'inverter.
+
+**Cosa cambia per te:** l'entità `number.tbb_riio_sun_ii_smart_port` esiste
+ancora con lo stesso `entity_id`, ma ora la sua percentuale è riferita
+all'intervallo utile (0 % = 5 A, 100 % = 32 A). **Controlla le automazioni che
+la usano**, e verifica sul display dell'inverter che il valore impostato
+corrisponda.
+
+### ✨ Novità
+
+- **Tre entità scrivibili per la SmartPort**, tre viste dello stesso registro.
+  Scrivendone una, le altre due si aggiornano da sole:
+
+  | Entità | Unità | Intervallo | Passo |
+  |---|:---:|---|---|
+  | `number.tbb_riio_sun_ii_smart_port_a` | A | 5 → 32 | 1 A |
+  | `number.tbb_riio_sun_ii_smart_port_w` | W | 1150 → 7360 | 230 W (= 1 A) |
+  | `number.tbb_riio_sun_ii_smart_port` | % | 0 → 100 | 1 % |
+
+- Tre topic MQTT corrispondenti: `cmd/smart_port`, `cmd/smart_port_a`,
+  `cmd/smart_port_w`, ognuno con il proprio `/status`.
+- Nuove opzioni `smartport_min_a` (5), `smartport_max_a` (32) e
+  `smartport_voltage` (230): se la tua SmartPort ha un intervallo diverso, i
+  tre slider si riadattano senza modifiche al codice. Valori incoerenti
+  (intervallo invertito, tensione nulla) vengono segnalati e riportati ai
+  predefiniti invece di generare entità rotte.
+- I valori fuori scala vengono rifiutati **prima** di toccare l'inverter, su
+  tutte e tre le unità.
+
 ## 1.2.0
 
 ### ✨ Novità

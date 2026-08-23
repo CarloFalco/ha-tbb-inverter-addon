@@ -5,7 +5,7 @@
 **Porta il tuo inverter TBB RiiO Sun II dentro Home Assistant.**
 Nessun cloud, nessun account, nessun gateway proprietario: solo un cavo RS485 e MQTT.
 
-![Version](https://img.shields.io/badge/versione-1.2.0-1f8fff?style=for-the-badge)
+![Version](https://img.shields.io/badge/versione-1.3.0-1f8fff?style=for-the-badge)
 ![Arch](https://img.shields.io/badge/arch-aarch64%20%7C%20amd64-5ce1e6?style=for-the-badge)
 ![Setup](https://img.shields.io/badge/YAML%20richiesto-nessuno-ffb020?style=for-the-badge)
 
@@ -24,7 +24,7 @@ per dashboard, automazioni, statistiche a lungo termine e Energy Dashboard.
 | 🔌 **Uscite AC** | Due uscite indipendenti: V, A, W, **totale** — più frequenza e carico |
 | 🏠 **Ingresso rete** | Tensione, corrente e **potenza** con segno: sai subito se prelevi o immetti |
 | 🌡️ **Temperature** | Dissipatore, trasformatore, stadio inverter, batteria |
-| 🎚️ **SmartPort** | Uno slider in Home Assistant per impostarla da 0 a 100 % |
+| 🎚️ **SmartPort** | Tre slider sincronizzati — in **A**, in **W** o in **%** — che scrivono lo stesso valore |
 
 ---
 

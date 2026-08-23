@@ -1,5 +1,5 @@
 name: "TBB Inverter Reader"
-version: "1.2.0"
+version: "1.3.0"
 slug: "tbb_inverter"
 description: "Lettura e controllo via RS485/MQTT dell'inverter TBB RiiO Sun II, con creazione automatica delle entita' in Home Assistant"
 url: "https://github.com/CarloFalco/ha-tbb-inverter-addon/tree/main/tbb_inverter"
@@ -26,6 +26,9 @@ options:
   discovery_prefix: "homeassistant"
   allow_raw_command: false
   strict_crc: false
+  smartport_min_a: 5
+  smartport_max_a: 32
+  smartport_voltage: 230
   log_level: "info"
 schema:
   serial_port: str
@@ -40,4 +43,7 @@ schema:
   discovery_prefix: str
   allow_raw_command: bool
   strict_crc: bool
+  smartport_min_a: int(0,65535)
+  smartport_max_a: int(1,65535)
+  smartport_voltage: int(1,1000)
   log_level: list(trace|debug|info|notice|warning|error|fatal)

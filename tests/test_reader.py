@@ -167,6 +167,123 @@ mancanti = [k for k, _, _ in T.DERIVED if k not in sensor_keys]
 check("ogni canale calcolato ha la sua entita'", not mancanti, mancanti)
 
 
+# ---------------------------------------------------------------- SmartPort
+# Il registro contiene ampere: percentuale e watt sono solo altre viste.
+check("min A -> 0%", T.amps_to_pct(T.SMARTPORT_MIN_A) == 0, T.amps_to_pct(T.SMARTPORT_MIN_A))
+check("max A -> 100%", T.amps_to_pct(T.SMARTPORT_MAX_A) == 100, T.amps_to_pct(T.SMARTPORT_MAX_A))
+check("0% -> min A", T.pct_to_amps(0) == T.SMARTPORT_MIN_A, T.pct_to_amps(0))
+check("100% -> max A", T.pct_to_amps(100) == T.SMARTPORT_MAX_A, T.pct_to_amps(100))
+# 5 + 50% di 27 = 18.5; round() in Python arrotonda .5 al pari -> 18
+check("meta' scala (5-32 A) -> 18 A", T.pct_to_amps(50) == 18, T.pct_to_amps(50))
+check("watt = ampere x tensione nominale",
+      T.amps_to_watt(10) == 10 * T.SMARTPORT_VOLTAGE, T.amps_to_watt(10))
+check("watt -> ampere e' l'inverso", T.watt_to_amps(T.amps_to_watt(17)) == 17)
+
+# andata e ritorno su tutto l'intervallo: nessun ampere deve perdersi
+persi_w = [a for a in range(T.SMARTPORT_MIN_A, T.SMARTPORT_MAX_A + 1)
+           if T.watt_to_amps(T.amps_to_watt(a)) != a]
+check("ogni ampere sopravvive alla conversione in watt e ritorno", not persi_w, persi_w)
+persi_p = [a for a in range(T.SMARTPORT_MIN_A, T.SMARTPORT_MAX_A + 1)
+           if abs(T.pct_to_amps(T.amps_to_pct(a)) - a) > 1]
+check("la conversione in percentuale e ritorno resta entro 1 A", not persi_p, persi_p)
+
+
+class SmartCli:
+    def __init__(self):
+        self.pub = []
+
+    def publish(self, t, p=None, retain=False, **k):
+        self.pub.append((t, p))
+        return types.SimpleNamespace(rc=0)
+
+
+class OkSerial:
+    """Seriale che accetta le scritture e non risponde nulla."""
+    is_open = True
+
+    def __init__(self, _=b""):
+        self.written = bytearray()
+
+    @property
+    def in_waiting(self):
+        return 0
+
+    def read(self, n):
+        return b""
+
+    def write(self, b):
+        self.written += b
+        return len(b)
+
+    def reset_input_buffer(self):
+        pass
+
+
+T.ser_global = OkSerial(b"")
+T.mqtt_client = SmartCli()
+check("cmd_smart_port accetta un valore nell'intervallo", T.cmd_smart_port(20) is True)
+stati = dict(T.mqtt_client.pub)
+check("una scrittura aggiorna tutte e tre le entita'",
+      stati.get("tbb/inverter/smart_port_a") == 20
+      and stati.get("tbb/inverter/smart_port_w") == 20 * T.SMARTPORT_VOLTAGE
+      and stati.get("tbb/inverter/smart_port") == T.amps_to_pct(20), stati)
+
+check("cmd_smart_port rifiuta sotto il minimo", T.cmd_smart_port(T.SMARTPORT_MIN_A - 1) is False)
+check("cmd_smart_port rifiuta sopra il massimo", T.cmd_smart_port(T.SMARTPORT_MAX_A + 1) is False)
+
+# il frame scritto deve contenere gli ampere nel registro 0x005E
+T.ser_global = OkSerial(b"")
+T.cmd_smart_port(25)
+scritti = bytes(T.ser_global.written)
+atteso = T.build_frame(0x06, 0x005E, 25)
+check("il frame scrive gli ampere nel registro 0x005E", atteso in scritti, atteso.hex(" ").upper())
+
+# i tre topic di comando arrivano tutti allo stesso ampere
+for topic, payload, atteso_a in [
+    ("tbb/inverter/cmd/smart_port_a", b"16", 16),
+    ("tbb/inverter/cmd/smart_port_w", str(16 * T.SMARTPORT_VOLTAGE).encode(), 16),
+    ("tbb/inverter/cmd/smart_port", str(T.amps_to_pct(16)).encode(), 16),
+]:
+    T.ser_global = OkSerial(b"")
+    cli = SmartCli()
+    T.mqtt_client = cli
+    T.on_message(cli, None, types.SimpleNamespace(topic=topic, payload=payload))
+    ok_status = (f"{topic}/status", "OK") in [(t, p) for t, p in cli.pub]
+    a_scritto = dict(cli.pub).get("tbb/inverter/smart_port_a")
+    check(f"{topic.rsplit('/', 1)[1]} -> {atteso_a} A",
+          ok_status and a_scritto == atteso_a, a_scritto)
+
+# fuori scala su ciascuna unita'
+for topic, payload in [
+    ("tbb/inverter/cmd/smart_port_a", b"40"),
+    ("tbb/inverter/cmd/smart_port_a", b"1"),
+    ("tbb/inverter/cmd/smart_port_w", b"99999"),
+    ("tbb/inverter/cmd/smart_port", b"150"),
+    ("tbb/inverter/cmd/smart_port", b"-5"),
+]:
+    cli = SmartCli()
+    T.on_message(cli, None, types.SimpleNamespace(topic=topic, payload=payload))
+    check(f"{topic.rsplit('/', 1)[1]} rifiuta {payload.decode()}",
+          (f"{topic}/status", "ERRORE") in [(t, p) for t, p in cli.pub])
+
+# discovery: tre slider, stesso dispositivo, unita' diverse
+sliders = [(t, pl) for t, pl in T.discovery_payloads() if "/number/" in t]
+check("discovery espone tre slider SmartPort", len(sliders) == 3, len(sliders))
+check("i tre slider hanno unita' diverse",
+      {pl["unit_of_measurement"] for _, pl in sliders} == {"A", "W", "%"},
+      {pl["unit_of_measurement"] for _, pl in sliders})
+check("i tre slider hanno topic di comando distinti",
+      len({pl["command_topic"] for _, pl in sliders}) == 3)
+wsl = next(pl for _, pl in sliders if pl["unit_of_measurement"] == "W")
+check("lo slider in watt avanza di un ampere alla volta",
+      wsl["step"] == T.SMARTPORT_VOLTAGE
+      and wsl["min"] == T.amps_to_watt(T.SMARTPORT_MIN_A)
+      and wsl["max"] == T.amps_to_watt(T.SMARTPORT_MAX_A), wsl["step"])
+
+T.ser_global = None
+T.mqtt_client = None
+
+
 # ---------------------------------------------------------------- seriale finta
 class FakeSerial:
     def __init__(self, response=b"", fail=False):
@@ -244,7 +361,8 @@ check("il JSON aggregato contiene solo le chiavi lette", set(payload) == {"pv_w"
 
 # ---------------------------------------------------------------- discovery
 items = T.discovery_payloads()
-check("discovery genera un'entita' per sensore + lo slider", len(items) == len(T.SENSORS) + 1, len(items))
+check("discovery genera un'entita' per sensore + i tre slider SmartPort",
+      len(items) == len(T.SENSORS) + 3, len(items))
 check("i topic di discovery sono unici", len({t for t, _ in items}) == len(items))
 check("gli unique_id sono unici", len({p["unique_id"] for _, p in items}) == len(items))
 for topic, p in items:
@@ -252,9 +370,13 @@ for topic, p in items:
     assert topic.startswith("homeassistant/")
 check("ogni payload di discovery e' JSON valido e sotto il prefisso corretto", True)
 
-number = [p for t, p in items if "/number/" in t][0]
-check("lo slider SmartPort scrive sul topic di comando",
-      number["command_topic"] == "tbb/inverter/cmd/smart_port")
+numbers = {p["unit_of_measurement"]: p for t, p in items if "/number/" in t}
+check("lo slider SmartPort in % scrive sul proprio topic",
+      numbers["%"]["command_topic"] == "tbb/inverter/cmd/smart_port")
+check("lo slider SmartPort in A scrive sul proprio topic",
+      numbers["A"]["command_topic"] == "tbb/inverter/cmd/smart_port_a")
+check("lo slider SmartPort in W scrive sul proprio topic",
+      numbers["W"]["command_topic"] == "tbb/inverter/cmd/smart_port_w")
 check("ogni entita' ha l'availability topic",
       all(p["availability_topic"] == "tbb/inverter/availability" for _, p in items))
 check("ogni entita' appartiene allo stesso dispositivo",
