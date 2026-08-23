@@ -7,6 +7,7 @@ Esegui dalla radice del repository:
 """
 import json
 import os
+import random
 import sys
 import types
 from pathlib import Path
@@ -56,6 +57,27 @@ check("senza lunghezza dichiarata valida si prende il match piu' lungo",
 bad = bytearray(int(x, 16) for x in "7E FF 11 03 C0 08 BA EB".split())
 bad[3] ^= 0xFF
 check("crc_frame_length rifiuta un frame corrotto", T.crc_frame_length(bytes(bad)) is None)
+
+# il CRC usa una tabella precalcolata: deve restare identico alla definizione
+# bit-a-bit dello standard MODBUS
+def _crc_riferimento(data):
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return crc
+
+
+random.seed(20260822)
+diverse = sum(
+    1 for _ in range(5000)
+    if T.crc16_modbus(d := bytes(random.getrandbits(8)
+                                 for _ in range(random.randint(0, 64))))
+    != _crc_riferimento(d)
+)
+check("il CRC a tabella coincide con quello bit-a-bit (5000 casi casuali)",
+      diverse == 0, f"{diverse} differenze")
 
 check("build_frame produce il frame documentato",
       T.build_frame(0x06, 0x005E, 40).hex(" ").upper() == "7E FF 11 06 06 0C 00 5E 00 28 81 46",

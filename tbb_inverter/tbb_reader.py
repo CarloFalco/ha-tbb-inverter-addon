@@ -81,6 +81,13 @@ CMD_C1 = bytes([0x7E, 0xFF, 0x11, 0x03, 0xC1, 0x08, 0xBB, 0x7B])
 SERIAL_RETRY_DELAY = 10   # secondi tra due tentativi di riapertura della porta
 MAX_FAILED_CYCLES  = 3    # cicli a vuoto dopo i quali le entita' diventano non disponibili
 
+# Tetti di sicurezza. Una risposta reale sta in ~200 byte e un frame di
+# scrittura in 12: questi limiti servono solo a impedire che una linea RS485
+# rumorosa (bus flottante, adattatore guasto) o un payload MQTT malevolo
+# facciano crescere la memoria senza limite.
+MAX_RESPONSE_BYTES = 1024
+MAX_RAW_FRAME      = 64
+
 
 # ----------------------------------------------------------------
 # LOGGING
@@ -124,16 +131,25 @@ _crc_verified = False    # diventa True al primo frame con CRC valido
 # CRC e costruzione frame
 # ================================================================
 
+def _build_crc_table() -> list[int]:
+    """Tabella CRC16/MODBUS: un byte per passo invece di otto bit."""
+    table = []
+    for value in range(256):
+        crc = value
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+        table.append(crc)
+    return table
+
+
+_CRC_TABLE = _build_crc_table()
+
+
 def crc16_modbus(data: bytes) -> int:
     """CRC16/MODBUS: poly=0xA001, init=0xFFFF, little-endian."""
     crc = 0xFFFF
     for byte in data:
-        crc ^= byte
-        for _ in range(8):
-            if crc & 0x0001:
-                crc = (crc >> 1) ^ 0xA001
-            else:
-                crc >>= 1
+        crc = (crc >> 8) ^ _CRC_TABLE[(crc ^ byte) & 0xFF]
     return crc
 
 
@@ -160,12 +176,7 @@ def crc_frame_length(raw: bytes) -> int | None:
     matches = []
     crc = 0xFFFF
     for i, byte in enumerate(raw):
-        crc ^= byte
-        for _ in range(8):
-            if crc & 0x0001:
-                crc = (crc >> 1) ^ 0xA001
-            else:
-                crc >>= 1
+        crc = (crc >> 8) ^ _CRC_TABLE[(crc ^ byte) & 0xFF]
         n = i + 1
         if (n >= 6 and n + 2 <= len(raw)
                 and raw[n] == (crc & 0xFF)
@@ -233,20 +244,47 @@ def read_response(ser: serial.Serial, first_wait: float = 0.6,
     """
     buf = bytearray()
     t0 = last = time.monotonic()
+    overflow = False
+
     while True:
+        now = time.monotonic()
+
+        # Guardia assoluta, valutata PRIMA di leggere: se la linea non tace mai
+        # (bus flottante, adattatore guasto) il ciclo deve comunque finire.
+        # Senza questo controllo la lettura non termina, il buffer cresce
+        # all'infinito e ser_lock resta preso, bloccando anche i comandi MQTT.
+        if now - t0 >= max_wait:
+            if buf:
+                log.debug("Lettura chiusa dal limite di %.1fs (%d byte)",
+                          max_wait, len(buf))
+            break
+
         waiting = ser.in_waiting
         if waiting:
-            buf += ser.read(waiting)
+            chunk = ser.read(waiting)
+            if len(buf) + len(chunk) > MAX_RESPONSE_BYTES:
+                buf += chunk[:MAX_RESPONSE_BYTES - len(buf)]
+                overflow = True
+                break
+            buf += chunk
             last = time.monotonic()
             continue
-        now = time.monotonic()
+
         if buf and now - last >= idle_gap:
             break
         if not buf and now - t0 >= first_wait:
             break
-        if now - t0 >= max_wait:
-            break
         time.sleep(0.005)
+
+    if overflow:
+        log.warning("Ricevuti piu' di %d byte: probabile rumore sulla linea "
+                    "RS485. Ingresso svuotato per risincronizzare.",
+                    MAX_RESPONSE_BYTES)
+        try:
+            ser.reset_input_buffer()
+        except (serial.SerialException, OSError) as e:
+            log.debug("Svuotamento ingresso fallito: %s", e)
+
     return bytes(buf)
 
 
@@ -357,6 +395,14 @@ def cmd_raw(hex_string: str) -> bool:
         log.warning("Comando raw rifiutato: abilita 'allow_raw_command' "
                     "nella configurazione dell'add-on")
         return False
+
+    # Un payload MQTT puo' essere enorme: scartiamo prima di allocare, invece
+    # di convertire megabyte di testo per poi riversarli su una linea a 9600 baud.
+    if len(hex_string) > MAX_RAW_FRAME * 4:
+        log.warning("Frame raw rifiutato: %d caratteri, il massimo e' %d byte",
+                    len(hex_string), MAX_RAW_FRAME)
+        return False
+
     try:
         frame = bytes(int(x, 16) for x in hex_string.replace(",", " ").split())
     except ValueError as e:
@@ -364,6 +410,10 @@ def cmd_raw(hex_string: str) -> bool:
         return False
     if not frame:
         log.warning("Frame raw vuoto")
+        return False
+    if len(frame) > MAX_RAW_FRAME:
+        log.warning("Frame raw rifiutato: %d byte, il massimo e' %d",
+                    len(frame), MAX_RAW_FRAME)
         return False
 
     log.log(25, "Invio frame raw: %s", frame.hex(" ").upper())
@@ -692,8 +742,9 @@ def on_message(client, userdata, msg):
 
         if msg.topic == T_CMD_SMART:
             try:
+                # OverflowError copre "inf": round() non sa convertirlo.
                 value = round(float(payload))
-            except ValueError:
+            except (ValueError, OverflowError):
                 log.warning("Valore SmartPort non numerico: %r", payload)
                 client.publish(f"{T_CMD_SMART}/status", "ERRORE")
                 return
@@ -845,6 +896,16 @@ def main():
                 set_available(mqtt_client, False)
                 time.sleep(SERIAL_RETRY_DELAY)
                 continue
+            except Exception:
+                # Rete di sicurezza: qualunque errore imprevisto non deve far
+                # morire l'add-on in silenzio. Lo registriamo con lo stack,
+                # segnaliamo le entita' come non disponibili e riproviamo.
+                log.exception("Errore imprevisto nel ciclo %d", cycle)
+                failed += 1
+                if failed >= MAX_FAILED_CYCLES:
+                    set_available(mqtt_client, False)
+                time.sleep(POLL_INTERVAL)
+                continue
 
             if data:
                 failed = 0
@@ -868,9 +929,12 @@ def main():
             time.sleep(0.2)          # lascia il tempo di svuotare la coda
             mqtt_client.loop_stop()
             mqtt_client.disconnect()
-        if ser_global is not None and ser_global.is_open:
-            with ser_lock:
-                ser_global.close()
+        try:
+            if ser_global is not None and ser_global.is_open:
+                with ser_lock:
+                    ser_global.close()
+        except (serial.SerialException, OSError) as e:
+            log.debug("Chiusura porta in uscita fallita: %s", e)
         log.info("Porta e MQTT chiusi.")
 
 

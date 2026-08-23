@@ -14,6 +14,7 @@ Home Assistant.
 | [🎛️ Comandi di scrittura](#-comandi-di-scrittura) | SmartPort e frame raw |
 | [📡 Topic MQTT](#-topic-mqtt) | Riferimento completo dei topic |
 | [🛠️ Risoluzione problemi](#-risoluzione-problemi) | Cosa fare quando non funziona |
+| [🛡 Impronta sul sistema](#-impronta-sul-sistema) | Risorse usate e salute del Raspberry Pi |
 
 ---
 
@@ -462,6 +463,94 @@ probabilmente non è esposta dal tuo modello o firmware.
 
 Nella pagina dell'add-on, attiva l'interruttore **Watchdog**: Home Assistant lo
 riavvierà da solo se dovesse terminare in modo inatteso.
+
+---
+
+## 🛡 Impronta sul sistema
+
+### Quanto consuma
+
+| Risorsa | Valore tipico |
+|---|---|
+| CPU | trascurabile: circa 2 ms di calcolo per ciclo, cioè ogni `poll_interval` secondi |
+| Memoria | costante. Un soak test di 10.000 cicli non mostra crescita |
+| Thread | due: il ciclo di polling e la rete MQTT |
+| Scritture su disco | nessuna: l'add-on non scrive file |
+| Privilegi | solo `uart` (accesso alla seriale). Niente rete host, niente accesso privilegiato, nessuna API di Home Assistant |
+
+Le letture sono protette da tetti espliciti: una risposta è limitata a 1024
+byte e ogni lettura termina comunque entro il proprio limite di tempo, anche se
+la linea RS485 non tace mai. Un frame `cmd/raw` oltre 64 byte viene rifiutato
+prima di essere elaborato.
+
+### Il vero costo è il database di Home Assistant
+
+L'add-on è leggero, ma le **entità che crea non lo sono**: con
+`poll_interval: 5` una ventina di valori cambia ogni 5 secondi, e il *recorder*
+di Home Assistant li scrive tutti nel database. Sono centinaia di migliaia di
+righe al giorno.
+
+Su Home Assistant installato su **microSD** questo è il singolo fattore che più
+logora la scheda, ed è una causa classica di sistemi che dopo mesi diventano
+instabili o non si avviano più. Due contromisure, entrambe utili:
+
+**1. Non registrare ciò che non ti serve.** In `configuration.yaml`:
+
+```yaml
+recorder:
+  exclude:
+    entity_globs:
+      - sensor.tbb_riio_sun_ii_t_*
+      - sensor.tbb_riio_sun_ii_ac_out2_*
+      - sensor.tbb_riio_sun_ii_bat_v_bms
+      - sensor.tbb_riio_sun_ii_ac_freq
+```
+
+**2. Alza `poll_interval`.** Passare da 5 a 15 secondi riduce di due terzi le
+scritture e per l'andamento giornaliero non cambia nulla.
+
+Se puoi, **sposta Home Assistant su SSD o NVMe**: è il rimedio definitivo.
+
+### Se il Raspberry Pi si blocca del tutto
+
+Un add-on gira dentro un container e non può rendere irraggiungibile l'SSH: se
+consumasse troppa memoria, il kernel terminerebbe il processo (OOM killer) e il
+resto del sistema resterebbe in piedi. Un blocco totale ha quasi sempre una
+causa a livello di sistema. In ordine di frequenza:
+
+| Causa | Come riconoscerla |
+|---|---|
+| **Alimentatore insufficiente** | `dmesg \| grep -i voltage` mostra `Undervoltage detected`. È la causa numero uno, spesso peggiorata proprio dall'adattatore USB-RS485 che assorbe corrente |
+| **microSD in degrado** | `dmesg \| grep -i mmc` e errori di I/O, filesystem che passa in sola lettura |
+| **Memoria esaurita** | `dmesg \| grep -i "out of memory"` elenca il processo terminato |
+| **Surriscaldamento** | `vcgencmd measure_temp`, throttling sopra gli 80 °C |
+
+Comandi utili subito dopo un riavvio anomalo, dall'add-on **Terminal & SSH**:
+
+```bash
+dmesg -T | grep -iE "voltage|out of memory|mmc|I/O error|throttl" | tail -30
+```
+
+```bash
+ha supervisor logs | tail -50
+```
+
+Per vedere quanta memoria sta usando davvero questo add-on, prima trova il suo
+slug (installato da repository git, ha un prefisso generato):
+
+```bash
+ha addons list | grep -i -B2 -A2 tbb
+```
+
+poi:
+
+```bash
+ha addons stats SLUG_TROVATO_SOPRA
+```
+
+Se `memory_percent` resta stabile nel tempo, l'add-on non c'entra con il blocco.
+Attiva anche l'interruttore **Watchdog** nella pagina dell'add-on: se dovesse
+terminare in modo inatteso, Home Assistant lo riavvia da solo.
 
 ---
 

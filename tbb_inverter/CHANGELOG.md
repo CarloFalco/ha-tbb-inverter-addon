@@ -18,6 +18,31 @@
   zero.
 - Il riepilogo nel log mostra una riga **Potenze** con batteria, rete e uscite.
 
+### 🛡 Stabilità e sicurezza
+
+- **La lettura seriale poteva non terminare mai.** Se la linea RS485 non
+  restava mai in silenzio (bus flottante senza terminazione, adattatore
+  guasto, altro dispositivo che trasmette in continuazione), il ciclo di
+  lettura ignorava il proprio limite di tempo: il buffer cresceva **senza
+  limite**, il lock della porta restava preso e anche i comandi MQTT si
+  bloccavano. Ora il limite di tempo vale sempre e la risposta è tetto a
+  1024 byte, con svuotamento dell'ingresso per risincronizzare.
+- **Un payload MQTT enorme su `cmd/raw` veniva convertito prima di essere
+  validato.** Ora i frame oltre 64 byte sono rifiutati senza allocare nulla:
+  un payload da 6 MB viene scartato in millisecondi.
+- **`inf` come valore SmartPort sollevava un'eccezione non gestita**
+  (`OverflowError` non era intercettato). Ora risponde `ERRORE` come ogni
+  altro valore non valido.
+- **Un errore imprevisto nel ciclo di lettura terminava l'add-on in
+  silenzio.** Ora viene registrato con lo stack, le entità passano a non
+  disponibili e il polling riprende.
+- Il CRC usa una tabella precalcolata: **~3× più veloce** a parità di
+  risultato (verificato su 5000 casi casuali contro la definizione
+  bit-a-bit), meno CPU sul Raspberry Pi.
+- Nuova suite `tests/test_stability.py`: linea rumorosa, payload ostili,
+  assenza di deadlock, tenuta del ciclo principale agli errori imprevisti.
+  Un soak test di 10.000 cicli non mostra perdite di memoria né di thread.
+
 ### 🔧 Sviluppo
 
 - I valori derivati (`ac_out2_w` e `bat_status`, già presenti) sono stati
