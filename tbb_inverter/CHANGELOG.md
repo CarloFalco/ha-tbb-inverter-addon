@@ -1,19 +1,46 @@
 # Changelog
 
+## 1.3.1
+
+### 🐛 Correzione della regressione introdotta dalla 1.3.0
+
+Nella 1.3.0 la SmartPort ha smesso di rispondere: qualunque valore si
+impostasse, l'inverter restava a 5 A. Le entità in Home Assistant si
+aggiornavano correttamente fra loro e il log riportava la scrittura, ma il
+numero che arrivava all'inverter era sbagliato.
+
+**Causa.** La 1.3.0 partiva dal presupposto che il registro `0x005E`
+contenesse la corrente in ampere e scriveva quindi valori 5-32. Il registro
+accetta invece **0-100**, come faceva la 1.2.0. Scrivendoci 5-32 si finiva in
+fondo alla scala — fra 1,6 A e 10,2 A — e l'inverter saturava al proprio
+minimo di 5 A per quasi tutto l'intervallo.
+
+**Correzione.** Il valore canonico torna a essere quello del registro (0-100):
+
+- Il topic `cmd/smart_port` e l'entità in percentuale scrivono di nuovo il
+  numero **così com'è**, senza conversioni. I frame trasmessi sono
+  byte-per-byte identici a quelli della 1.2.0 funzionante, su tutta la scala
+  — c'è un test che lo verifica confrontando le due implementazioni.
+- Le entità in ampere e in watt restano, ma come **viste derivate**:
+  convertono nel valore di registro prima di scrivere (16 A → 50).
+
+### ✨ Novità
+
+- Nuova opzione `smartport_a_at_zero` (predefinito `0`): la corrente
+  corrispondente al registro a 0. Insieme a `smartport_max_a` definisce la
+  mappatura lineare registro → ampere, e copre entrambe le convenzioni
+  possibili senza modifiche al codice.
+- La documentazione descrive una **verifica di un minuto** per stabilire quale
+  convenzione usi il tuo firmware: porta lo slider in percentuale a 50 e leggi
+  la corrente sul display dell'inverter.
+
 ## 1.3.0
 
-### ⚠ Cambiamento importante: la SmartPort è in ampere
+> ⚠️ **Questa versione ha una regressione sulla SmartPort, corretta nella
+> 1.3.1.** La premessa su cui si basava — "il registro contiene ampere" — si
+> è rivelata sbagliata alla prova sul campo. Le note qui sotto restano come
+> testimonianza storica; per il comportamento corretto vedi la 1.3.1.
 
-Il registro `0x005E` contiene **la corrente in ampere**, non una percentuale.
-Lo slider precedente, con scala 0-100 %, scriveva quindi il valore grezzo nel
-registro: impostare "40 %" significava scrivere **40 A**, fuori
-dall'intervallo utile di 5-32 A dell'inverter.
-
-**Cosa cambia per te:** l'entità `number.tbb_riio_sun_ii_smart_port` esiste
-ancora con lo stesso `entity_id`, ma ora la sua percentuale è riferita
-all'intervallo utile (0 % = 5 A, 100 % = 32 A). **Controlla le automazioni che
-la usano**, e verifica sul display dell'inverter che il valore impostato
-corrisponda.
 
 ### ✨ Novità
 

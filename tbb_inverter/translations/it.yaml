@@ -50,6 +50,13 @@ configuration:
       Scarta le risposte il cui CRC non e' valido invece di provare comunque a
       decodificarle. Attivalo solo dopo aver visto nel log che la verifica CRC
       funziona sul tuo inverter.
+  smartport_a_at_zero:
+    name: SmartPort - ampere a 0 %
+    description: >-
+      Corrente corrispondente al valore 0 del registro. Metti 0 se la
+      percentuale dell'inverter e' riferita al fondoscala (50 % = meta' della
+      corrente massima), oppure la corrente minima se e' riferita
+      all'intervallo utile. Vedi la verifica nella documentazione.
   smartport_min_a:
     name: SmartPort - corrente minima
     description: >-

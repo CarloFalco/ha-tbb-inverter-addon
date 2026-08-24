@@ -50,6 +50,13 @@ configuration:
       Drop responses whose CRC does not validate instead of decoding them
       anyway. Turn it on once the log shows CRC verification works on your
       inverter.
+  smartport_a_at_zero:
+    name: SmartPort - amperes at 0 %
+    description: >-
+      Current matching register value 0. Use 0 if the inverter percentage is
+      relative to full scale (50 % = half the maximum current), or the minimum
+      current if it is relative to the usable range. See the check described in
+      the documentation.
   smartport_min_a:
     name: SmartPort - minimum current
     description: >-

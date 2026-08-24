@@ -80,8 +80,9 @@ flusso.
 | `discovery_prefix` | `homeassistant` | Cambialo solo se hai personalizzato il prefisso di discovery dell'integrazione MQTT. |
 | `allow_raw_command` | `false` | Abilita il topic `cmd/raw`. Vedi [l'avviso](#frame-raw). |
 | `strict_crc` | `false` | Scarta le risposte con CRC non valido invece di provare comunque a decodificarle. |
-| `smartport_min_a` | `5` | Corrente minima ammessa dall'inverter per la SmartPort. |
-| `smartport_max_a` | `32` | Corrente massima ammessa dall'inverter per la SmartPort. |
+| `smartport_a_at_zero` | `0` | Corrente corrispondente al registro a 0. Vedi la verifica nei [comandi](#-comandi-di-scrittura). |
+| `smartport_min_a` | `5` | Estremo inferiore dello slider in ampere. |
+| `smartport_max_a` | `32` | Corrente corrispondente al registro a 100, ed estremo superiore dello slider. |
 | `smartport_voltage` | `230` | Tensione usata per convertire ampere in watt nello slider in W. |
 | `log_level` | `info` | `info` stampa la tabella dei valori ad ogni ciclo, `notice` solo gli eventi, `debug` aggiunge i frame esadecimali TX/RX. |
 
@@ -154,9 +155,9 @@ le entità già configurate:
 | Tensione / Corrente rete | V / A | `sensor.tbb_riio_sun_ii_ac_in_v` … |
 | **Potenza rete** ⚙ | W | `sensor.tbb_riio_sun_ii_ac_in_w` |
 | Temperature dissipatore / trasformatore / inverter | °C | *(diagnostica)* |
+| **SmartPort percentuale** *(scrivibile)* | % | `number.tbb_riio_sun_ii_smart_port` |
 | **SmartPort corrente** *(scrivibile)* | A | `number.tbb_riio_sun_ii_smart_port_a` |
 | **SmartPort potenza** *(scrivibile)* | W | `number.tbb_riio_sun_ii_smart_port_w` |
-| **SmartPort percentuale** *(scrivibile)* | % | `number.tbb_riio_sun_ii_smart_port` |
 
 Le voci con ⚙ sono [canali calcolati](#-canali-calcolati). `bat_status` vale
 *In carica*, *In scarica* o *A riposo*, ricavato dal segno della corrente di
@@ -282,19 +283,18 @@ vuoi tracciare i consumi di entrambe le uscite.
 
 ### SmartPort: tre slider, un solo valore
 
-Il registro `0x005E` dell'inverter contiene una **corrente in ampere**, con un
-intervallo utile di **5-32 A**. Per comodità l'add-on la espone in tre unità
-diverse, con tre entità scrivibili:
+Il registro `0x005E` dell'inverter accetta un valore **0-100**. È quello, e solo
+quello, che viene realmente scritto: le entità in ampere e in watt sono viste
+comode dello stesso numero, convertite prima della scrittura.
 
-| Entità | Unità | Intervallo | Passo |
+| Entità | Unità | Intervallo | Cosa scrive nel registro |
 |---|:---:|---|---|
-| `number.tbb_riio_sun_ii_smart_port_a` | A | 5 → 32 | 1 A |
-| `number.tbb_riio_sun_ii_smart_port_w` | W | 1150 → 7360 | 230 W (= 1 A) |
-| `number.tbb_riio_sun_ii_smart_port` | % | 0 → 100 | 1 % |
+| `number.tbb_riio_sun_ii_smart_port` | % | 0 → 100 | il numero stesso, senza conversioni |
+| `number.tbb_riio_sun_ii_smart_port_a` | A | 5 → 32 | il valore convertito (16 A → 50) |
+| `number.tbb_riio_sun_ii_smart_port_w` | W | 1150 → 7360 | idem, passando per gli ampere |
 
 **Sono tre viste della stessa cosa.** Scrivendone una, le altre due si
-aggiornano da sole: non sono impostazioni indipendenti. La percentuale è
-riferita all'intervallo utile, quindi `0 %` significa 5 A e non 0 A.
+aggiornano da sole: non sono impostazioni indipendenti.
 
 Per le automazioni conviene quella in ampere o in watt:
 
@@ -315,49 +315,33 @@ data:
   payload: "16"
 ```
 
-L'add-on converte in ampere, verifica che il valore sia nell'intervallo, invia
-la sequenza di sblocco richiesta dall'inverter e scrive il registro `0x005E`.
-Un valore fuori scala viene rifiutato senza toccare l'inverter.
+L'add-on converte nel valore di registro, verifica che sia nell'intervallo,
+invia la sequenza di sblocco richiesta dall'inverter e scrive `0x005E`. Un
+valore fuori scala viene rifiutato senza trasmettere un solo byte.
 
-> **Sulla conversione in watt.** Usa la tensione nominale dell'opzione
-> `smartport_voltage` (230 V), non quella misurata istante per istante: così il
-> valore che imposti resta quello che rileggi, invece di ballare con la rete.
-> È una corrente limite espressa in watt, non una misura di potenza.
+#### La mappatura registro → ampere
 
-> **Se la tua SmartPort ha un intervallo diverso** da 5-32 A, correggilo con le
-> opzioni `smartport_min_a` e `smartport_max_a`: i tre slider si riadattano da
-> soli, senza modifiche al codice.
+È lineare su due punti, entrambi configurabili:
 
-#### Verifica consigliata al primo utilizzo
+| Opzione | Default | Significato |
+|---|:---:|---|
+| `smartport_a_at_zero` | `0` | corrente quando il registro vale **0** |
+| `smartport_max_a` | `32` | corrente quando il registro vale **100** |
+| `smartport_min_a` | `5` | estremo inferiore dello slider in ampere (l'inverter non scende sotto) |
 
-Imposta lo slider in ampere su un valore noto — per esempio **16 A** — e
-controlla che l'inverter mostri lo stesso valore sul proprio display. Se non
-coincide, l'intervallo configurato non corrisponde a quello del tuo firmware.
+Con i valori predefiniti: registro 50 → 16 A, registro 100 → 32 A.
 
-> ℹ️ Una nota di trasparenza: il frame di esempio raccolto durante il reverse
-> engineering (`... 00 5E 00 28 ...`) scrive **40** nel registro, un valore
-> fuori dall'intervallo 5-32 A. O quel frame non era una scrittura SmartPort, o
-> su alcuni firmware la scala è diversa. È il motivo per cui gli estremi sono
-> configurabili e per cui vale la pena fare la verifica qui sopra.
-
-### Frame raw
-
-> ⚠️ **Disabilitato per impostazione predefinita.** Attiva `allow_raw_command`
-> nella configurazione per usarlo. Questo topic scrive **direttamente** nei
-> registri dell'inverter: un frame sbagliato può modificare parametri di
-> funzionamento dell'impianto. Usalo solo se hai la documentazione del registro
-> che stai toccando, e non esporre il broker MQTT su Internet senza
-> autenticazione.
-
-Byte in esadecimale separati da spazi, **CRC incluso** (non viene calcolato
-dall'add-on):
-
-```yaml
-action: mqtt.publish
-data:
-  topic: tbb/inverter/cmd/raw
-  payload: "7E FF 11 06 06 0C 00 5E 00 28 81 46"
-```
+> ⚠️ **Verifica quale delle due convenzioni usa il tuo firmware.** Porta lo
+> slider **in percentuale a 50** e leggi la corrente sul display dell'inverter:
+>
+> | Il display mostra | Significa | Cosa fare |
+> |---|---|---|
+> | **~16 A** | la percentuale è riferita al fondoscala | niente, è il default |
+> | **~18-19 A** | è riferita all'intervallo utile 5-32 A | imposta `smartport_a_at_zero: 5` |
+>
+> Finché non fai questa verifica, lo slider in percentuale è comunque esatto:
+> scrive nel registro il numero che vedi. Sono gli slider in A e in W a
+> dipendere dalla mappatura.
 
 ### Esito dei comandi
 
