@@ -1,5 +1,96 @@
 # Changelog
 
+## 1.3.2
+
+### 🐛 La SmartPort torna a rispondere
+
+Dalla 1.3.0 la SmartPort non recepiva piu' i valori impostati. La 1.3.1 aveva
+individuato la causa nel punto giusto -- la conversione -- ma con la premessa
+sbagliata, e ne aveva corretto solo meta'.
+
+**Causa.** Il registro `0x005E` accetta 0-100, ma su questo firmware **quel
+numero sono direttamente gli ampere**: scrivere 20 imposta 20 A, sotto 5 non
+succede nulla, sopra 32 l'inverter satura. La 1.3.1 assumeva invece che fosse
+una percentuale e in `amps_to_register` moltiplicava per 100/32 = 3,125: lo
+slider a 16 A scriveva 50, cioe' fondo scala. Restava esatto solo lo slider in
+percentuale, l'unico senza conversione.
+
+**Verificato, non dedotto.** I byte che `cmd_smart_port` mette sulla linea sono
+identici a quelli della primissima versione funzionante per **ogni** valore da
+0 a 100 -- sequenza di sblocco, CRC e ordine compresi. Il trasporto non e' mai
+regredito: c'e' un test che lo confronta con il sorgente preso da git. La
+regressione era solo nel numero che arrivava fin li'.
+
+**Perche' sembrava che non arrivasse nulla.** Un registro fuori dall'intervallo
+accettato non viene saturato: viene *rifiutato*, e la SmartPort ricade al
+minimo di 5 A. Con il fattore 3,125 questo succedeva da 11 A in su -- 22
+posizioni dello slider su 28:
+
+| Slider in ampere | Registro scritto | Esito sull'inverter |
+|---|---|---|
+| 5 - 10 A | 16 - 31 | accettato, ma corrente sbagliata (16-31 A) |
+| **11 - 32 A** | **34 - 100** | **rifiutato: resta a 5 A** |
+
+Qualunque valore d'uso reale cadeva nella seconda riga. Il sintomo -- "resta
+sempre a 5 A qualunque cosa imposti" -- somiglia a una scrittura che non parte,
+ed e' cio' che aveva portato la 1.3.1 a cercare la causa nella premessa
+sbagliata.
+
+**Correzione.** Ampere e watt tornano a scrivere il valore che l'inverter si
+aspetta:
+
+| Slider | Prima (1.3.1) | Ora |
+|---|---|---|
+| 16 A | registro 50 (= fondo scala) | registro 16 |
+| 32 A | registro 100 | registro 32 |
+| 3680 W | registro 50 | registro 16 |
+
+Lo slider grezzo continua a scrivere il numero cosi' com'e' e non e' piu'
+etichettato come percentuale: quando il registro contiene ampere, quel "%" era
+la meta' cosmetica dello stesso equivoco. Si chiama ora **SmartPort registro**
+(stessa entita', stesso `entity_id`).
+
+### ✨ Novita'
+
+- Nuova opzione `smartport_register_unit` (`ampere` predefinito, oppure
+  `percent`): copre entrambe le convenzioni possibili senza toccare il codice.
+  La documentazione descrive una verifica di un minuto per stabilire quale usa
+  il tuo firmware. `smartport_a_at_zero` resta, e vale solo in `percent`.
+- **Il log segue la scrittura da capo a fondo.** Gia' con `log_level: info`
+  compaiono il comando ricevuto, la conversione applicata, il valore di
+  registro e tutti e tre i frame trasmessi con la relativa risposta:
+
+  ```
+  [NOTICE] Comando ricevuto: tbb/inverter/cmd/smart_port_a = 16
+  [INFO] Conversione: 16.0 A -> registro 16  (identita')
+  [NOTICE] SmartPort -> registro 0x005E = 16  (interpretato come 16 A, ~3680 W; ...)
+  [INFO] TX 1/3 (12 byte): 7E FF 11 06 66 0C 00 73 00 0A 98 F6
+  [INFO] RX 1/3: nessuna risposta entro 0.2s
+  ```
+
+  Se l'inverter non risponde a nessuno dei tre frame viene segnalato
+  esplicitamente, distinguendo il caso innocuo (firmware che non risponde alle
+  scritture) da quello reale (linea RS485 muta). Con la porta chiusa il log
+  dice quale porta e quanti frame sono stati scartati, invece di un generico
+  "non disponibile".
+- **Avviso prima di trasmettere** quando il valore di registro cade fuori
+  dall'intervallo accettato dall'inverter: e' il caso che fa ricadere la
+  SmartPort al minimo, e non e' distinguibile a occhio da una scrittura persa.
+- Il banner di avvio stampa i **frame di riferimento** per gli estremi dello
+  slider: si confrontano a occhio con una cattura dell'app nativa senza dover
+  far partire una scrittura.
+
+### 🛡 Correzioni minori
+
+- `ser.flush()` dopo ogni scrittura: i byte sono sulla linea prima che inizi
+  l'attesa della risposta, invece di restare eventualmente nel buffer del
+  driver.
+- `cmd_smart_port` rifiuta un valore non intero invece di lasciar sollevare
+  `TypeError` dentro `build_frame`. L'eccezione sarebbe finita nel thread di
+  rete di paho e la scrittura sarebbe fallita in silenzio.
+- Con il registro in ampere, un `smartport_max_a` oltre 100 verrebbe troncato
+  dal registro: ora viene segnalato e riportato a 32.
+
 ## 1.3.1
 
 ### 🐛 Correzione della regressione introdotta dalla 1.3.0

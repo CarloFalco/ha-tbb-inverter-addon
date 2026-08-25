@@ -101,6 +101,9 @@ class SlowDrip:
     def reset_input_buffer(self):
         pass
 
+    def flush(self):
+        pass
+
 
 t0 = time.monotonic()
 ok3, buf3 = run_with_timeout(lambda: T.read_response(SlowDrip(), max_wait=0.5), 4.0)
@@ -127,6 +130,9 @@ class GoodLine:
 
     def reset_input_buffer(self):
         self.served = False
+
+    def flush(self):
+        pass
 
     def write(self, b):
         return len(b)
@@ -209,6 +215,9 @@ class Ser:
 
     def reset_input_buffer(self):
         self._s = False
+
+    def flush(self):
+        pass
 
     def write(self, b):
         return len(b)

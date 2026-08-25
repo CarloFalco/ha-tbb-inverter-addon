@@ -50,6 +50,14 @@ configuration:
       Drop responses whose CRC does not validate instead of decoding them
       anyway. Turn it on once the log shows CRC verification works on your
       inverter.
+  smartport_register_unit:
+    name: SmartPort - register meaning
+    description: >-
+      What register 0x005E holds. "ampere": the number written is the current
+      in amps directly (writing 20 sets 20 A) -- this is what was observed on
+      the RiiO Sun II. "percent": the register is a 0-100 percentage mapped
+      onto the range defined below. If the amp slider sets a different current
+      than requested, try the other mode.
   smartport_a_at_zero:
     name: SmartPort - amperes at 0 %
     description: >-

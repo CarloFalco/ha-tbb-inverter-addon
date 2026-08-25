@@ -10,7 +10,7 @@ Connessione:
   RJ45 pin 8 (GND)          -> GND adattatore (opzionale)
 
 Comandi MQTT in ingresso (topic <prefix>/cmd/...):
-  <prefix>/cmd/smart_port     <- percentuale 0-100 dell'intervallo utile
+  <prefix>/cmd/smart_port     <- valore grezzo del registro 0x005E (0-100)
   <prefix>/cmd/smart_port_a   <- corrente in ampere (5-32 per impostazione predefinita)
   <prefix>/cmd/smart_port_w   <- potenza in watt alla tensione nominale
                                  Tutti e tre scrivono lo stesso registro 0x005E.
@@ -66,14 +66,22 @@ DISCOVERY         = _env_bool("MQTT_DISCOVERY", True)
 DISCOVERY_PREFIX  = os.environ.get("DISCOVERY_PREFIX", "homeassistant").strip("/")
 ALLOW_RAW_COMMAND = _env_bool("ALLOW_RAW_COMMAND", False)
 
-# SmartPort. Il registro 0x005E accetta un valore 0-100: e' quello il valore
-# canonico, l'unico che viene realmente scritto sull'inverter. Ampere e watt
-# sono viste derivate, convertite prima della scrittura.
+# SmartPort. Il registro 0x005E accetta un valore 0-100; quello che quel numero
+# *significa* dipende dal firmware, e le due convenzioni possibili portano a
+# frame completamente diversi. La scelta e' esplicita, non indovinata:
 #
-# Mappatura registro -> corrente, lineare su due punti:
-#     0   -> SMARTPORT_A_AT_ZERO
-#     100 -> SMARTPORT_MAX_A
-SMARTPORT_A_AT_ZERO = _env_int("SMARTPORT_A_AT_ZERO", 0)
+#   "ampere"  (predefinito) il registro contiene direttamente gli ampere.
+#             Scrivere 20 -> 20 A. E' cio' che e' stato osservato sul campo:
+#             0-4 nessun effetto (sotto il minimo dell'inverter), 5-32 -> 5-32 A,
+#             oltre 32 l'inverter satura al proprio massimo.
+#
+#   "percent" il registro e' una percentuale: 0 -> SMARTPORT_A_AT_ZERO ampere,
+#             100 -> SMARTPORT_MAX_A ampere, lineare fra i due.
+#
+# In entrambi i casi il valore canonico resta quello del registro: e' l'unico
+# numero che viene davvero trasmesso, ampere e watt sono viste derivate.
+SMARTPORT_REGISTER_UNIT = os.environ.get("SMARTPORT_REGISTER_UNIT", "ampere").strip().lower()
+SMARTPORT_A_AT_ZERO = _env_int("SMARTPORT_A_AT_ZERO", 0)   # solo in modalita' "percent"
 SMARTPORT_MIN_A     = _env_int("SMARTPORT_MIN_A", 5)    # estremi utili dello slider
 SMARTPORT_MAX_A     = _env_int("SMARTPORT_MAX_A", 32)
 SMARTPORT_VOLTAGE   = _env_int("SMARTPORT_VOLTAGE", 230)
@@ -358,31 +366,67 @@ def send_write_sequence(frames: list[bytes], delay: float = 0.2) -> bool:
     """
     Invia una sequenza di frame di scrittura all'inverter.
     Ritorna True se tutti i frame sono stati inviati correttamente.
+
+    Ogni frame trasmesso e la relativa risposta sono registrati a livello INFO:
+    sono rari (solo comandi dell'utente) e sono la prima cosa da guardare
+    quando l'inverter non sembra recepire una scrittura.
     """
     ser = ser_global
     if ser is None or not ser.is_open:
-        log.warning("Porta seriale non disponibile: comando ignorato")
+        log.warning("Porta seriale non disponibile: comando ignorato "
+                    "(porta %s, %d frame scartati)", PORT, len(frames))
         return False
 
+    # Il lock e' condiviso con il ciclo di polling: se la sequenza dovesse
+    # attendere, e' un'informazione utile quanto i byte trasmessi.
+    atteso = time.monotonic()
     with ser_lock:
-        for frame in frames:
+        attesa = time.monotonic() - atteso
+        if attesa > 0.05:
+            log.debug("Attesi %.2fs per la porta seriale (ciclo di lettura in corso)",
+                      attesa)
+        muti = 0
+        for n, frame in enumerate(frames, 1):
             try:
                 ser.reset_input_buffer()
-                ser.write(frame)
-                log.debug("TX: %s", frame.hex(" ").upper())
+                scritti = ser.write(frame)
+                ser.flush()          # i byte devono essere sulla linea prima dell'attesa
+                log.info("TX %d/%d (%s byte): %s",
+                         n, len(frames), scritti, frame.hex(" ").upper())
                 time.sleep(delay)
                 resp = read_response(ser, first_wait=delay, max_wait=0.5)
                 if resp:
-                    log.debug("ACK: %s", resp.hex(" ").upper())
+                    log.info("RX %d/%d (%d byte): %s",
+                             n, len(frames), len(resp), resp.hex(" ").upper())
+                else:
+                    muti += 1
+                    log.info("RX %d/%d: nessuna risposta entro %.1fs",
+                             n, len(frames), delay)
             except (serial.SerialException, OSError) as e:
-                log.error("Errore invio frame: %s", e)
+                log.error("Errore invio frame %d/%d (%s): %s",
+                          n, len(frames), frame.hex(" ").upper(), e)
                 return False
+
+    if muti == len(frames):
+        # Non e' necessariamente un errore -- alcuni firmware non rispondono
+        # alle scritture -- ma se la scrittura non ha effetto e' il primo
+        # indizio che i frame non stanno arrivando all'inverter.
+        log.warning("L'inverter non ha risposto a nessuno dei %d frame: "
+                    "verifica cablaggio A+/B-, terminazione e baud rate. "
+                    "Il ciclo di lettura funziona? Se anche i sensori sono "
+                    "fermi, il problema e' la linea, non il comando.",
+                    len(frames))
     return True
 
 
 # ================================================================
 # Comandi inverter
 # ================================================================
+
+def _registro_in_ampere() -> bool:
+    """True se il registro 0x005E contiene direttamente gli ampere."""
+    return SMARTPORT_REGISTER_UNIT != "percent"
+
 
 def _smartport_span() -> float:
     """Ampere coperti da un'escursione del registro da 0 a 100. Mai zero."""
@@ -391,11 +435,21 @@ def _smartport_span() -> float:
 
 def register_to_amps(register: float) -> float:
     """Valore del registro (0-100) -> corrente in ampere."""
+    if _registro_in_ampere():
+        return float(register)
     return SMARTPORT_A_AT_ZERO + register * _smartport_span() / 100
 
 
 def amps_to_register(amps: float) -> int:
-    """Corrente in ampere -> valore da scrivere nel registro (0-100)."""
+    """
+    Corrente in ampere -> valore da scrivere nel registro (0-100).
+
+    In modalita' "ampere" e' l'identita': 16 A -> 16. Questa e' la conversione
+    che la 1.3.1 sbagliava, moltiplicando per 100/32 = 3,125 e mandando 16 A a
+    fondo scala.
+    """
+    if _registro_in_ampere():
+        return max(0, min(100, round(amps)))
     register = (amps - SMARTPORT_A_AT_ZERO) * 100 / _smartport_span()
     return max(0, min(100, round(register)))
 
@@ -416,20 +470,42 @@ def cmd_smart_port(register: int) -> bool:
 
     `register` e' il valore 0-100 che l'inverter si aspetta, ed e' esattamente
     cio' che viene trasmesso: le entita' in ampere e in watt sono viste
-    derivate, gia' convertite prima di arrivare qui. Scrivere direttamente gli
-    ampere (5-32) finirebbe in fondo alla scala e l'inverter saturerebbe al
-    minimo.
+    derivate, gia' convertite prima di arrivare qui.
+
+    I frame prodotti qui sono byte per byte quelli della primissima versione
+    funzionante, per ogni valore da 0 a 100 -- c'e' un test che lo verifica
+    contro il sorgente preso da git. Se una scrittura non ha effetto, la causa
+    non e' in questa funzione ma nel numero che le viene passato: e' per questo
+    che il log riporta l'intera catena di conversione.
 
     Sequenza: sblocco reg 0x73, sblocco reg 0x74, scrittura reg 0x5E.
     """
+    if not isinstance(register, int):
+        # build_frame fa >> e & : un float qui solleverebbe TypeError dentro il
+        # thread di rete di paho, e la scrittura fallirebbe in silenzio.
+        log.warning("Valore SmartPort non intero: %r (%s)", register, type(register).__name__)
+        return False
     if not 0 <= register <= 100:
         log.warning("Valore SmartPort non valido: %s (il registro accetta 0-100)",
                     register)
         return False
 
     amps = round(register_to_amps(register))
-    log.log(25, "Impostazione SmartPort: registro %d  (~%d A, ~%d W)",
-            register, amps, amps_to_watt(amps))
+    log.log(25, "SmartPort -> registro 0x005E = %d  (interpretato come %d A, ~%d W; "
+                "modalita' registro: %s)",
+            register, amps, amps_to_watt(amps),
+            "ampere" if _registro_in_ampere() else "percent")
+
+    # Un registro fuori dall'intervallo che l'inverter accetta non viene
+    # saturato: viene rifiutato, e la SmartPort ricade al proprio minimo. E'
+    # il sintomo che ha nascosto la regressione della 1.3.1 -- "resta sempre a
+    # 5 A" sembra una scrittura che non arriva, mentre arriva un numero che
+    # l'inverter scarta. Meglio dirlo prima di trasmettere.
+    if _registro_in_ampere() and not SMARTPORT_MIN_A <= register <= SMARTPORT_MAX_A:
+        log.warning("Il registro %d e' fuori dall'intervallo accettato (%d-%d): "
+                    "l'inverter con ogni probabilita' scartera' la scrittura e "
+                    "restera' al minimo di %d A.",
+                    register, SMARTPORT_MIN_A, SMARTPORT_MAX_A, SMARTPORT_MIN_A)
     frames = [
         build_frame(0x66, 0x0073, 0x000A),   # sblocco 1
         build_frame(0x66, 0x0074, 0x000A),   # sblocco 2
@@ -700,7 +776,10 @@ def discovery_payloads() -> list[tuple[str, dict]]:
          amps_to_watt(SMARTPORT_MIN_A), amps_to_watt(SMARTPORT_MAX_A),
          SMARTPORT_VOLTAGE, "mdi:flash"),
 
-        ("smart_port", "SmartPort percentuale", "%",
+        # Slider grezzo: scrive nel registro il numero cosi' com'e'. Non e' una
+        # percentuale quando il registro contiene ampere -- etichettarlo "%"
+        # era la meta' cosmetica dello stesso equivoco che rompeva le altre due.
+        ("smart_port", "SmartPort registro", "" if _registro_in_ampere() else "%",
          T_CMD_SMART, T_SMART_STATE,
          0, 100, 1, "mdi:transmission-tower"),
     ]
@@ -714,8 +793,8 @@ def discovery_payloads() -> list[tuple[str, dict]]:
                 "command_topic": cmd_t,
                 "state_topic": stat_t,
                 "availability_topic": T_AVAILABILITY,
+                **({"unit_of_measurement": unit} if unit else {}),
                 "min": minimo, "max": massimo, "step": passo,
-                "unit_of_measurement": unit,
                 "mode": "slider",
                 "icon": icon,
                 "entity_category": "config",
@@ -753,12 +832,12 @@ def publish_discovery(client: mqtt.Client, enabled: bool):
 # topic -> (unita', limiti ammessi, conversione nel valore di registro 0-100).
 # I limiti sono funzioni perche' dipendono dalle opzioni lette all'avvio.
 #
-# La riga del "%" usa l'identita': quel topic scrive nel registro esattamente
-# il numero ricevuto, senza alcuna conversione. E' il comportamento che
-# funzionava prima che le entita' in ampere e watt esistessero, e va lasciato
-# intatto.
+# La prima riga usa l'identita': quel topic scrive nel registro esattamente il
+# numero ricevuto, senza alcuna conversione. E' il comportamento della
+# primissima versione funzionante e va lasciato intatto -- e' anche la via di
+# fuga se le altre due unita' dovessero sbagliare conversione.
 SMARTPORT_COMMANDS = {
-    T_CMD_SMART:   ("%", lambda: (0, 100), round),
+    T_CMD_SMART:   ("(registro)", lambda: (0, 100), round),
     T_CMD_SMART_A: ("A", lambda: (SMARTPORT_MIN_A, SMARTPORT_MAX_A),
                     amps_to_register),
     T_CMD_SMART_W: ("W", lambda: (amps_to_watt(SMARTPORT_MIN_A),
@@ -855,7 +934,11 @@ def on_message(client, userdata, msg):
                 client.publish(f"{msg.topic}/status", "ERRORE")
                 return
 
-            ok = cmd_smart_port(in_registro(valore))
+            registro = in_registro(valore)
+            log.info("Conversione: %s %s -> registro %s%s",
+                     valore, unita, registro,
+                     "  (identita')" if float(registro) == float(valore) else "")
+            ok = cmd_smart_port(registro)
             client.publish(f"{msg.topic}/status", "OK" if ok else "ERRORE")
 
         elif msg.topic == T_CMD_RAW:
@@ -950,7 +1033,12 @@ def validate_smartport_config():
     conversioni: meglio tornare ai valori predefiniti segnalandolo.
     """
     global SMARTPORT_MIN_A, SMARTPORT_MAX_A, SMARTPORT_VOLTAGE, SMARTPORT_A_AT_ZERO
+    global SMARTPORT_REGISTER_UNIT
 
+    if SMARTPORT_REGISTER_UNIT not in ("ampere", "percent"):
+        log.warning("smartport_register_unit sconosciuto (%r): uso 'ampere'",
+                    SMARTPORT_REGISTER_UNIT)
+        SMARTPORT_REGISTER_UNIT = "ampere"
     if SMARTPORT_A_AT_ZERO >= SMARTPORT_MAX_A:
         log.warning("Mappatura SmartPort non valida (0 %% -> %d A, 100 %% -> %d A): "
                     "uso 0 -> 32 A", SMARTPORT_A_AT_ZERO, SMARTPORT_MAX_A)
@@ -966,6 +1054,14 @@ def validate_smartport_config():
         log.warning("Tensione nominale SmartPort non valida (%d V): uso 230 V",
                     SMARTPORT_VOLTAGE)
         SMARTPORT_VOLTAGE = 230
+    if _registro_in_ampere() and SMARTPORT_MAX_A > 100:
+        # In modalita' "ampere" gli estremi dello slider sono anche valori di
+        # registro: oltre 100 verrebbero silenziosamente troncati.
+        log.warning("Con il registro in ampere il massimo non puo' superare 100 A "
+                    "(richiesti %d): uso 32 A", SMARTPORT_MAX_A)
+        SMARTPORT_MAX_A = 32
+        if SMARTPORT_MIN_A >= SMARTPORT_MAX_A:
+            SMARTPORT_MIN_A = 5
 
 
 def banner():
@@ -976,13 +1072,27 @@ def banner():
     log.info("  MQTT:      %s:%d  (prefix: %s)", MQTT_HOST, MQTT_PORT, MQTT_PREFIX)
     log.info("  Polling:   ogni %ds", POLL_INTERVAL)
     log.info("  Discovery: %s", "abilitato" if DISCOVERY else "disabilitato")
-    log.info("  SmartPort: registro 0-100  ->  %d-%d A  (0%% = %d A, 100%% = %d A)",
-             SMARTPORT_MIN_A, SMARTPORT_MAX_A, SMARTPORT_A_AT_ZERO, SMARTPORT_MAX_A)
+    if _registro_in_ampere():
+        log.info("  SmartPort: il registro 0x005E contiene AMPERE (nessuna conversione)")
+        log.info("             slider: %d-%d A  =  registro %d-%d",
+                 SMARTPORT_MIN_A, SMARTPORT_MAX_A, SMARTPORT_MIN_A, SMARTPORT_MAX_A)
+    else:
+        log.info("  SmartPort: il registro 0x005E e' una PERCENTUALE")
+        log.info("             registro 0-100  ->  %d-%d A  (slider utile %d-%d A)",
+                 SMARTPORT_A_AT_ZERO, SMARTPORT_MAX_A,
+                 SMARTPORT_MIN_A, SMARTPORT_MAX_A)
     log.info("             slider in watt: %d-%d W a %d V nominali",
              amps_to_watt(SMARTPORT_MIN_A), amps_to_watt(SMARTPORT_MAX_A),
              SMARTPORT_VOLTAGE)
     log.info("  Comandi:   %s/cmd/smart_port[_a|_w]  |  raw %s",
              MQTT_PREFIX, "abilitato" if ALLOW_RAW_COMMAND else "disabilitato")
+
+    # Frame di riferimento: si confrontano a occhio con una cattura dell'app
+    # nativa senza dover far partire una scrittura.
+    for a in (SMARTPORT_MIN_A, SMARTPORT_MAX_A):
+        r = amps_to_register(a)
+        log.info("  Esempio:   %d A -> registro %-3d -> %s",
+                 a, r, build_frame(0x06, 0x005E, r).hex(" ").upper())
     log.info("=" * 55)
 
 

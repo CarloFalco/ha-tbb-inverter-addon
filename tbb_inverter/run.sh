@@ -6,6 +6,7 @@ export SERIAL_PORT BAUD POLL_INTERVAL
 export MQTT_HOST MQTT_PORT MQTT_USER MQTT_PASS MQTT_PREFIX
 export MQTT_DISCOVERY DISCOVERY_PREFIX ALLOW_RAW_COMMAND STRICT_CRC
 export SMARTPORT_MIN_A SMARTPORT_MAX_A SMARTPORT_VOLTAGE SMARTPORT_A_AT_ZERO
+export SMARTPORT_REGISTER_UNIT
 export LOG_LEVEL ADDON_VERSION
 
 SERIAL_PORT=$(bashio::config 'serial_port')
@@ -16,6 +17,7 @@ MQTT_DISCOVERY=$(bashio::config 'mqtt_discovery')
 DISCOVERY_PREFIX=$(bashio::config 'discovery_prefix')
 ALLOW_RAW_COMMAND=$(bashio::config 'allow_raw_command')
 STRICT_CRC=$(bashio::config 'strict_crc')
+SMARTPORT_REGISTER_UNIT=$(bashio::config 'smartport_register_unit')
 SMARTPORT_A_AT_ZERO=$(bashio::config 'smartport_a_at_zero')
 SMARTPORT_MIN_A=$(bashio::config 'smartport_min_a')
 SMARTPORT_MAX_A=$(bashio::config 'smartport_max_a')
@@ -64,6 +66,10 @@ fi
 bashio::log.info "Avvio TBB Inverter Reader ${ADDON_VERSION}"
 bashio::log.info "Porta seriale: ${SERIAL_PORT}  Baud: ${BAUD}  Poll: ${POLL_INTERVAL}s"
 bashio::log.info "Prefix MQTT: ${MQTT_PREFIX}  Discovery: ${MQTT_DISCOVERY}"
-bashio::log.info "SmartPort: registro 0-100 mappato su ${SMARTPORT_A_AT_ZERO}-${SMARTPORT_MAX_A} A, slider utile ${SMARTPORT_MIN_A}-${SMARTPORT_MAX_A} A"
+if [ "${SMARTPORT_REGISTER_UNIT}" = "percent" ]; then
+    bashio::log.info "SmartPort: registro 0-100 = percentuale, mappato su ${SMARTPORT_A_AT_ZERO}-${SMARTPORT_MAX_A} A"
+else
+    bashio::log.info "SmartPort: registro 0-100 = ampere diretti, slider ${SMARTPORT_MIN_A}-${SMARTPORT_MAX_A} A"
+fi
 
 exec python3 -u /tbb_reader.py

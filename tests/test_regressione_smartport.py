@@ -1,10 +1,23 @@
 """
 Test di non regressione sulla SmartPort.
 
-La 1.3.0 scriveva gli ampere (5-32) nel registro 0x005E, che invece accetta
-0-100: l'inverter saturava al minimo di 5 A. Questo test confronta i frame
-emessi oggi con quelli della 1.2.0, l'ultima versione funzionante, prendendola
-direttamente dalla storia di git.
+Riferimento: il commit iniziale, dove la scrittura funzionava sul campo. Da
+li' viene la verita' sperimentale su cosa contiene il registro 0x005E:
+
+    scrivendo N grezzo,  N = 5..32  ->  l'inverter imposta N ampere
+                         N < 5      ->  nessun effetto (sotto il minimo)
+                         N > 32     ->  satura al massimo
+
+Cioe' **il registro contiene ampere**. La 1.3.1 ha assunto il contrario
+(registro = percentuale 0-100) e ha introdotto in `amps_to_register` un
+fattore 100/32 = 3,125 che manda 16 A a fondo scala: e' la regressione che
+questo test blocca.
+
+Due controlli distinti, da non confondere:
+
+ 1. i byte trasmessi da `cmd_smart_port(N)` devono restare identici a quelli
+    della versione funzionante, per ogni N -- il trasporto non deve muoversi;
+ 2. la catena di conversione deve portare N ampere al registro N.
 
 Esegui dalla radice del repository:
 
@@ -27,7 +40,7 @@ RADICE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(RADICE / "tbb_inverter"))
 import tbb_reader as T
 
-RIFERIMENTO = "ca3fc60"          # v1.2.0: ultima versione con la SmartPort funzionante
+RIFERIMENTO = "12bb125"          # commit iniziale: SmartPort verificata sul campo
 
 fails = []
 
@@ -58,6 +71,9 @@ class Ser:
     def reset_input_buffer(self):
         pass
 
+    def flush(self):
+        pass
+
 
 class Cli:
     def publish(self, *a, **k):
@@ -75,7 +91,7 @@ def carica_versione_storica():
         print("      il confronto storico viene saltato, gli altri controlli restano.")
         return None
 
-    percorso = Path(tempfile.gettempdir()) / "tbb_reader_v120.py"
+    percorso = Path(tempfile.gettempdir()) / f"tbb_reader_{RIFERIMENTO}.py"
     percorso.write_text(sorgente, encoding="utf-8")
     spec = importlib.util.spec_from_file_location("tbb_reader_v120", percorso)
     modulo = importlib.util.module_from_spec(spec)
@@ -91,8 +107,12 @@ def accelera(modulo):
     attesa della risposta, e il confronto su tutta la scala 0-100 richiederebbe
     diversi minuti.
     """
-    modulo.read_response = lambda *a, **k: b""
     modulo.time.sleep = lambda *a, **k: None
+    if hasattr(modulo, "read_response"):
+        modulo.read_response = lambda *a, **k: b""
+    # Le versioni storiche tracciano con print(): un attributo di modulo con
+    # quel nome ha la precedenza sulla builtin e zittisce 300 righe di frame.
+    modulo.print = lambda *a, **k: None
     return modulo
 
 
@@ -111,43 +131,115 @@ def frame_da_topic(topic, valore):
     return bytes(T.ser_global.written)
 
 
-# --- confronto con la versione funzionante --------------------------------
+# --- 1. il trasporto non e' cambiato --------------------------------------
+# Per ogni valore di registro, i byte sulla seriale devono essere quelli della
+# versione che funzionava: stesso sblocco, stesso CRC, stesso ordine.
 accelera(T)
 storico = carica_versione_storica()
 if storico is not None:
     accelera(storico)
-    diversi = []
-    for pct in range(0, 101):
-        if frame_di(storico, pct) != frame_da_topic("cmd/smart_port", pct):
-            diversi.append(pct)
-    check(f"i frame in percentuale sono identici alla {RIFERIMENTO} su tutta la scala 0-100",
+    diversi = [n for n in range(0, 101)
+               if frame_di(storico, n) != frame_di(T, n)]
+    check(f"cmd_smart_port(N) emette i byte della {RIFERIMENTO} per ogni N in 0-100",
           not diversi, f"differiscono a: {diversi[:10]}")
 
-# --- il registro riceve 0-100, mai gli ampere -----------------------------
+    # ...e il topic grezzo deve continuare a passare N senza toccarlo.
+    diversi = [n for n in range(0, 101)
+               if frame_di(storico, n) != frame_da_topic("cmd/smart_port", n)]
+    check(f"il topic grezzo scrive come la {RIFERIMENTO} su tutta la scala 0-100",
+          not diversi, f"differiscono a: {diversi[:10]}")
+
+
+# --- 2. la conversione porta N ampere al registro N -----------------------
 def registro_scritto(frame):
+    """Ricava dal frame il valore finito nel registro 0x005E."""
     for candidato in range(0, 101):
         if T.build_frame(0x06, 0x005E, candidato) in frame:
             return candidato
     return None
 
 
-check("il topic in percentuale scrive il numero senza convertirlo",
-      all(registro_scritto(frame_da_topic("cmd/smart_port", p)) == p
-          for p in (0, 17, 40, 63, 100)))
+check("il topic grezzo scrive il numero senza convertirlo",
+      all(registro_scritto(frame_da_topic("cmd/smart_port", n)) == n
+          for n in (0, 17, 40, 63, 100)))
 
-# la regressione in una riga: 16 A non deve piu' finire grezzo nel registro
-check("16 A non viene piu' scritto grezzo nel registro",
-      registro_scritto(frame_da_topic("cmd/smart_port_a", 16)) != 16)
-check("16 A diventa il valore di registro corretto",
-      registro_scritto(frame_da_topic("cmd/smart_port_a", 16)) == T.amps_to_register(16))
+# La regressione in una riga: 16 A deve tornare a essere il registro 16,
+# non 50 come lo mandava la 1.3.1.
+check("16 A finisce nel registro come 16 (non 50, come nella 1.3.1)",
+      registro_scritto(frame_da_topic("cmd/smart_port_a", 16)) == 16,
+      registro_scritto(frame_da_topic("cmd/smart_port_a", 16)))
 
-# nessuna scrittura puo' uscire da 0-100, qualunque sia l'unita' di partenza
-fuori = []
-for amp in range(T.SMARTPORT_MIN_A, T.SMARTPORT_MAX_A + 1):
-    reg = registro_scritto(frame_da_topic("cmd/smart_port_a", amp))
-    if reg is None or not 0 <= reg <= 100:
-        fuori.append((amp, reg))
+sbagliati = [(a, registro_scritto(frame_da_topic("cmd/smart_port_a", a)))
+             for a in range(T.SMARTPORT_MIN_A, T.SMARTPORT_MAX_A + 1)]
+check("ogni ampere dello slider arriva al registro senza conversioni",
+      all(a == reg for a, reg in sbagliati),
+      [x for x in sbagliati if x[0] != x[1]][:10])
+
+# Lo slider in watt passa per gli ampere: 230 W = 1 A al voltaggio predefinito.
+sbagliati = [(a, registro_scritto(frame_da_topic("cmd/smart_port_w", a * T.SMARTPORT_VOLTAGE)))
+             for a in range(T.SMARTPORT_MIN_A, T.SMARTPORT_MAX_A + 1)]
+check("lo slider in watt arriva al registro corrispondente",
+      all(a == reg for a, reg in sbagliati),
+      [x for x in sbagliati if x[0] != x[1]][:10])
+
+# Nessuna scrittura puo' uscire da 0-100, qualunque sia l'unita' di partenza.
+fuori = [(a, reg) for a, reg in
+         ((a, registro_scritto(frame_da_topic("cmd/smart_port_a", a)))
+          for a in range(T.SMARTPORT_MIN_A, T.SMARTPORT_MAX_A + 1))
+         if reg is None or not 0 <= reg <= 100]
 check("ogni ampere dello slider produce un registro valido 0-100", not fuori, fuori)
+
+
+# --- 3. il sintomo osservato sul campo: "resta sempre a 5 A" -------------
+# Un registro fuori da MIN_A-MAX_A viene rifiutato dall'inverter, che ricade al
+# minimo. Con il fattore 3,125 della 1.3.1 questo accadeva da 11 A in su: 22
+# posizioni dello slider su 28 finivano a 5 A. Nessun ampere dello slider deve
+# piu' produrre un registro che l'inverter scarterebbe.
+rifiutati = [a for a in range(T.SMARTPORT_MIN_A, T.SMARTPORT_MAX_A + 1)
+             if not T.SMARTPORT_MIN_A <= registro_scritto(
+                 frame_da_topic("cmd/smart_port_a", a)) <= T.SMARTPORT_MAX_A]
+check("nessuna posizione dello slider produce un registro che l'inverter rifiuta",
+      not rifiutati, f"{len(rifiutati)} valori: {rifiutati[:8]}")
+
+# La stessa cosa in watt.
+rifiutati = [a for a in range(T.SMARTPORT_MIN_A, T.SMARTPORT_MAX_A + 1)
+             if not T.SMARTPORT_MIN_A <= registro_scritto(
+                 frame_da_topic("cmd/smart_port_w", a * T.SMARTPORT_VOLTAGE))
+             <= T.SMARTPORT_MAX_A]
+check("nemmeno lo slider in watt produce registri rifiutati",
+      not rifiutati, f"{len(rifiutati)} valori: {rifiutati[:8]}")
+
+# Controprova: con la conversione della 1.3.1, 22 valori su 28 sarebbero
+# finiti fuori intervallo. Se questo controllo smette di valere, la formula
+# sbagliata e' cambiata e il confronto va rivisto.
+def reg_131(a):
+    return max(0, min(100, round(a * 100 / T.SMARTPORT_MAX_A)))
+
+
+fuori_131 = [a for a in range(T.SMARTPORT_MIN_A, T.SMARTPORT_MAX_A + 1)
+             if not T.SMARTPORT_MIN_A <= reg_131(a) <= T.SMARTPORT_MAX_A]
+check("controprova: la formula della 1.3.1 mandava fuori scala da 11 A in su",
+      fuori_131 and fuori_131[0] == 11 and len(fuori_131) == 22,
+      f"{len(fuori_131)} valori da {fuori_131[0] if fuori_131 else '-'} A")
+
+
+# --- 4. la modalita' "percent" resta disponibile e coerente ---------------
+T.SMARTPORT_REGISTER_UNIT = "percent"
+try:
+    check("in modalita' percent 32 A va a fondo scala (registro 100)",
+          T.amps_to_register(32) == 100, T.amps_to_register(32))
+    check("in modalita' percent il registro 50 vale meta' scala",
+          round(T.register_to_amps(50)) == 16, T.register_to_amps(50))
+finally:
+    T.SMARTPORT_REGISTER_UNIT = "ampere"
+
+check("tornati in modalita' ampere, 32 A resta il registro 32",
+      T.amps_to_register(32) == 32)
+
+# Un float non deve mai raggiungere build_frame: >> su float e' TypeError, e
+# l'eccezione morirebbe dentro il thread di rete di paho.
+check("un registro non intero viene rifiutato invece di sollevare",
+      T.cmd_smart_port(20.5) is False)
 
 print()
 print("TUTTI I TEST PASSATI" if not fails else "FALLITI: " + ", ".join(fails))

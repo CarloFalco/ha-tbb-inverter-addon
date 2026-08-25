@@ -80,9 +80,10 @@ flusso.
 | `discovery_prefix` | `homeassistant` | Cambialo solo se hai personalizzato il prefisso di discovery dell'integrazione MQTT. |
 | `allow_raw_command` | `false` | Abilita il topic `cmd/raw`. Vedi [l'avviso](#frame-raw). |
 | `strict_crc` | `false` | Scarta le risposte con CRC non valido invece di provare comunque a decodificarle. |
-| `smartport_a_at_zero` | `0` | Corrente corrispondente al registro a 0. Vedi la verifica nei [comandi](#-comandi-di-scrittura). |
+| `smartport_register_unit` | `ampere` | Cosa contiene il registro `0x005E`: `ampere` (il numero **sono** gli ampere) o `percent`. Vedi la verifica nei [comandi](#-comandi-di-scrittura). |
+| `smartport_a_at_zero` | `0` | Solo con `percent`: corrente corrispondente al registro a 0. |
 | `smartport_min_a` | `5` | Estremo inferiore dello slider in ampere. |
-| `smartport_max_a` | `32` | Corrente corrispondente al registro a 100, ed estremo superiore dello slider. |
+| `smartport_max_a` | `32` | Estremo superiore dello slider in ampere (e corrente a registro 100 con `percent`). |
 | `smartport_voltage` | `230` | Tensione usata per convertire ampere in watt nello slider in W. |
 | `log_level` | `info` | `info` stampa la tabella dei valori ad ogni ciclo, `notice` solo gli eventi, `debug` aggiunge i frame esadecimali TX/RX. |
 
@@ -155,7 +156,7 @@ le entità già configurate:
 | Tensione / Corrente rete | V / A | `sensor.tbb_riio_sun_ii_ac_in_v` … |
 | **Potenza rete** ⚙ | W | `sensor.tbb_riio_sun_ii_ac_in_w` |
 | Temperature dissipatore / trasformatore / inverter | °C | *(diagnostica)* |
-| **SmartPort percentuale** *(scrivibile)* | % | `number.tbb_riio_sun_ii_smart_port` |
+| **SmartPort registro** *(scrivibile)* | — | `number.tbb_riio_sun_ii_smart_port` |
 | **SmartPort corrente** *(scrivibile)* | A | `number.tbb_riio_sun_ii_smart_port_a` |
 | **SmartPort potenza** *(scrivibile)* | W | `number.tbb_riio_sun_ii_smart_port_w` |
 
@@ -283,15 +284,27 @@ vuoi tracciare i consumi di entrambe le uscite.
 
 ### SmartPort: tre slider, un solo valore
 
-Il registro `0x005E` dell'inverter accetta un valore **0-100**. È quello, e solo
-quello, che viene realmente scritto: le entità in ampere e in watt sono viste
-comode dello stesso numero, convertite prima della scrittura.
+Il registro `0x005E` dell'inverter accetta un valore **0-100**, e su questo
+firmware **quel numero sono gli ampere**: scrivere 20 imposta 20 A. Il
+comportamento osservato sul RiiO Sun II è:
+
+| Valore scritto | Effetto |
+|---|---|
+| 0 → 4 | sotto il minimo: la scrittura non ha effetto |
+| 5 → 32 | 5 A → 32 A, uno a uno |
+| oltre 32 | **fuori intervallo: l'inverter scarta la scrittura e resta a 5 A** |
+
+L'ultima riga è la più insidiosa da diagnosticare: un valore rifiutato non
+satura al massimo, fa *ricadere* la SmartPort al minimo. «Resta sempre a 5 A»
+sembra una scrittura che non arriva, mentre in realtà arriva un numero che
+l'inverter non accetta. Per questo, dalla 1.3.2, il log avvisa **prima** di
+trasmettere quando il registro finisce fuori intervallo.
 
 | Entità | Unità | Intervallo | Cosa scrive nel registro |
 |---|:---:|---|---|
-| `number.tbb_riio_sun_ii_smart_port` | % | 0 → 100 | il numero stesso, senza conversioni |
-| `number.tbb_riio_sun_ii_smart_port_a` | A | 5 → 32 | il valore convertito (16 A → 50) |
-| `number.tbb_riio_sun_ii_smart_port_w` | W | 1150 → 7360 | idem, passando per gli ampere |
+| `number.tbb_riio_sun_ii_smart_port` | — | 0 → 100 | il numero stesso, senza conversioni |
+| `number.tbb_riio_sun_ii_smart_port_a` | A | 5 → 32 | il numero stesso (16 A → 16) |
+| `number.tbb_riio_sun_ii_smart_port_w` | W | 1150 → 7360 | i watt divisi per la tensione nominale |
 
 **Sono tre viste della stessa cosa.** Scrivendone una, le altre due si
 aggiornano da sole: non sono impostazioni indipendenti.
@@ -319,29 +332,55 @@ L'add-on converte nel valore di registro, verifica che sia nell'intervallo,
 invia la sequenza di sblocco richiesta dall'inverter e scrive `0x005E`. Un
 valore fuori scala viene rifiutato senza trasmettere un solo byte.
 
-#### La mappatura registro → ampere
+#### Se il tuo firmware interpreta il registro come percentuale
 
-È lineare su due punti, entrambi configurabili:
+Non tutti i firmware devono per forza comportarsi come quello verificato qui.
+L'opzione `smartport_register_unit` copre entrambe le convenzioni:
 
-| Opzione | Default | Significato |
-|---|:---:|---|
-| `smartport_a_at_zero` | `0` | corrente quando il registro vale **0** |
-| `smartport_max_a` | `32` | corrente quando il registro vale **100** |
-| `smartport_min_a` | `5` | estremo inferiore dello slider in ampere (l'inverter non scende sotto) |
+| Valore | Significato | Esempio |
+|---|---|---|
+| `ampere` *(default)* | il registro **è** la corrente | slider a 16 A → scrive 16 |
+| `percent` | il registro è una percentuale 0-100 mappata su `smartport_a_at_zero` → `smartport_max_a` | slider a 16 A → scrive 50 |
 
-Con i valori predefiniti: registro 50 → 16 A, registro 100 → 32 A.
+**Come capire quale ti serve, in un minuto.** Porta lo slider **SmartPort
+corrente** a 20 A e leggi la corrente sul display dell'inverter:
 
-> ⚠️ **Verifica quale delle due convenzioni usa il tuo firmware.** Porta lo
-> slider **in percentuale a 50** e leggi la corrente sul display dell'inverter:
->
-> | Il display mostra | Significa | Cosa fare |
-> |---|---|---|
-> | **~16 A** | la percentuale è riferita al fondoscala | niente, è il default |
-> | **~18-19 A** | è riferita all'intervallo utile 5-32 A | imposta `smartport_a_at_zero: 5` |
->
-> Finché non fai questa verifica, lo slider in percentuale è comunque esatto:
-> scrive nel registro il numero che vedi. Sono gli slider in A e in W a
-> dipendere dalla mappatura.
+| Il display mostra | Modalità corretta |
+|---|---|
+| **~20 A** | `ampere` — è il default, non toccare nulla |
+| **5 A** (cioè il minimo) o **~6-7 A** | `percent` |
+
+In modalità `percent` valgono anche `smartport_a_at_zero` (corrente a registro
+0) e `smartport_max_a` (corrente a registro 100), che definiscono la retta di
+conversione.
+
+> Lo slider **SmartPort registro** scrive sempre il numero che vedi, senza
+> alcuna conversione, in entrambe le modalità: è la via di fuga se le altre
+> due dovessero sbagliare.
+
+#### Quando una scrittura non ha effetto
+
+Il log riporta l'intera catena, dal comando MQTT ai byte sulla linea. Con
+`log_level: info` una scrittura produce:
+
+```
+[NOTICE] Comando ricevuto: tbb/inverter/cmd/smart_port_a = 16
+[INFO] Conversione: 16.0 A -> registro 16  (identita')
+[NOTICE] SmartPort -> registro 0x005E = 16  (interpretato come 16 A, ~3680 W; modalita' registro: ampere)
+[INFO] TX 1/3 (12 byte): 7E FF 11 06 66 0C 00 73 00 0A 98 F6
+[INFO] TX 2/3 (12 byte): 7E FF 11 06 66 0C 00 74 00 0A 29 37
+[INFO] TX 3/3 (12 byte): 7E FF 11 06 06 0C 00 5E 00 10 80 94
+```
+
+Cosa guardare, nell'ordine:
+
+| Sintomo nel log | Significato |
+|---|---|
+| manca «Comando ricevuto» | il comando non arriva: controlla il broker MQTT e il prefisso dei topic |
+| «Conversione» mostra un registro diverso da quello atteso | è la modalità del registro: vedi la sezione sopra |
+| i tre `TX` ci sono ma l'inverter non cambia | i byte partono: confrontali con l'esempio stampato nel banner all'avvio |
+| «L'inverter non ha risposto a nessuno dei 3 frame» | plausibile se i sensori funzionano (alcuni firmware non rispondono alle scritture); se anche le letture sono ferme, il problema è la linea RS485 |
+| «Porta seriale non disponibile» | l'adattatore USB non è aperto: vedi la sezione risoluzione dei problemi |
 
 ### Esito dei comandi
 
@@ -352,8 +391,10 @@ Con i valori predefiniti: registro 50 → 16 A, registro 100 → 32 A.
 | `<prefix>/cmd/smart_port_w/status` | `OK` / `ERRORE` |
 | `<prefix>/cmd/raw/status` | `OK` / `ERRORE` |
 
-Con `log_level: debug` la scheda **Log** mostra il dettaglio di ogni frame
-trasmesso (`TX:`) e delle risposte ricevute (`ACK:`).
+I frame trasmessi da una scrittura (`TX n/3`) e le relative risposte
+(`RX n/3`) compaiono già con `log_level: info`, perché sono rari e sono la
+prima cosa da guardare. Con `log_level: debug` si aggiungono anche i frame
+esadecimali di **ogni ciclo di lettura**.
 
 ---
 

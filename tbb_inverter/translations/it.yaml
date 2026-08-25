@@ -50,6 +50,15 @@ configuration:
       Scarta le risposte il cui CRC non e' valido invece di provare comunque a
       decodificarle. Attivalo solo dopo aver visto nel log che la verifica CRC
       funziona sul tuo inverter.
+  smartport_register_unit:
+    name: SmartPort - significato del registro
+    description: >-
+      Cosa contiene il registro 0x005E. "ampere": il numero scritto sono
+      direttamente gli ampere (scrivere 20 imposta 20 A) -- e' il
+      comportamento osservato sul RiiO Sun II. "percent": il registro e' una
+      percentuale 0-100 mappata sull'intervallo definito qui sotto. Se lo
+      slider in ampere imposta una corrente diversa da quella richiesta,
+      prova l'altra modalita'.
   smartport_a_at_zero:
     name: SmartPort - ampere a 0 %
     description: >-
@@ -75,6 +84,7 @@ configuration:
   log_level:
     name: Livello di log
     description: >-
-      info mostra la tabella dei valori ad ogni ciclo, notice solo gli eventi,
-      debug aggiunge i frame esadecimali TX/RX.
+      info mostra la tabella dei valori ad ogni ciclo e i frame delle
+      scritture SmartPort, notice solo gli eventi, debug aggiunge i frame
+      esadecimali di ogni lettura.
 network: {}

@@ -168,17 +168,17 @@ check("ogni canale calcolato ha la sua entita'", not mancanti, mancanti)
 
 
 # ---------------------------------------------------------------- SmartPort
-# Il registro 0x005E accetta 0-100: e' quello il valore canonico. Ampere e watt
-# sono viste derivate. Scrivere gli ampere grezzi nel registro (regressione
-# della 1.3.0) faceva saturare l'inverter al minimo.
-check("il registro 0 corrisponde all'ampere configurato",
-      T.register_to_amps(0) == T.SMARTPORT_A_AT_ZERO, T.register_to_amps(0))
-check("il registro 100 corrisponde alla corrente massima",
-      T.register_to_amps(100) == T.SMARTPORT_MAX_A, T.register_to_amps(100))
-check("con la mappatura predefinita meta' registro = meta' corrente",
-      T.register_to_amps(50) == 16, T.register_to_amps(50))
+# Il registro 0x005E accetta 0-100 e, sul RiiO Sun II, quel numero *sono* gli
+# ampere: scrivere 20 imposta 20 A. Ampere e watt restano viste derivate, ma
+# nella modalita' predefinita la conversione ampere->registro e' l'identita'.
+# La 1.3.1 ci applicava un fattore 100/32 e mandava 16 A a fondo scala.
+check("il registro 0 corrisponde a 0 A", T.register_to_amps(0) == 0,
+      T.register_to_amps(0))
+check("il registro contiene direttamente gli ampere",
+      T.register_to_amps(100) == 100 and T.register_to_amps(50) == 50,
+      (T.register_to_amps(100), T.register_to_amps(50)))
 check("gli ampere tornano al registro corretto",
-      T.amps_to_register(16) == 50, T.amps_to_register(16))
+      T.amps_to_register(16) == 16, T.amps_to_register(16))
 check("amps_to_register non esce mai da 0-100",
       T.amps_to_register(-999) == 0 and T.amps_to_register(9999) == 100)
 check("watt = ampere x tensione nominale",
@@ -220,6 +220,9 @@ class OkSerial:
     def reset_input_buffer(self):
         pass
 
+    def flush(self):
+        pass
+
 
 def scrivi(topic, payload):
     """Simula un comando MQTT e ritorna (esito, valore nel registro, stati)."""
@@ -238,28 +241,30 @@ def scrivi(topic, payload):
     return stato, reg, dict(cli.pub)
 
 
-# LA REGRESSIONE: il topic in percentuale deve scrivere il numero cosi' com'e'
-for pct in (0, 25, 40, 50, 75, 100):
-    esito, reg, _ = scrivi("cmd/smart_port", pct)
-    check(f"cmd/smart_port = {pct} scrive {pct} nel registro (nessuna conversione)",
-          esito == "OK" and reg == pct, reg)
+# LA REGRESSIONE: il topic grezzo deve scrivere il numero cosi' com'e'
+for n in (0, 25, 40, 50, 75, 100):
+    esito, reg, _ = scrivi("cmd/smart_port", n)
+    check(f"cmd/smart_port = {n} scrive {n} nel registro (nessuna conversione)",
+          esito == "OK" and reg == n, reg)
 
-# gli ampere vengono convertiti, non scritti grezzi
+# Il registro contiene ampere: anche lo slider in A scrive il numero grezzo.
+# La 1.3.1 ci metteva 50 (16 x 100/32), mandando 16 A a fondo scala.
 esito, reg, stati = scrivi("cmd/smart_port_a", 16)
-check("cmd/smart_port_a = 16 A NON scrive 16 nel registro", reg != 16, reg)
-check("cmd/smart_port_a = 16 A scrive 50 nel registro", esito == "OK" and reg == 50, reg)
+check("cmd/smart_port_a = 16 A scrive 16 nel registro", esito == "OK" and reg == 16, reg)
+check("cmd/smart_port_a = 16 A non scrive piu' 50 (regressione 1.3.1)", reg != 50, reg)
 
 esito, reg, _ = scrivi("cmd/smart_port_a", T.SMARTPORT_MAX_A)
-check("la corrente massima scrive 100 nel registro", reg == 100, reg)
+check("la corrente massima scrive il proprio valore nel registro",
+      reg == T.SMARTPORT_MAX_A, reg)
 
 esito, reg, _ = scrivi("cmd/smart_port_w", 16 * T.SMARTPORT_VOLTAGE)
-check("i watt corrispondenti a 16 A scrivono 50 nel registro", reg == 50, reg)
+check("i watt corrispondenti a 16 A scrivono 16 nel registro", reg == 16, reg)
 
 # le tre entita' restano coerenti dopo qualunque scrittura
-for topic, valore in [("cmd/smart_port", 50), ("cmd/smart_port_a", 16),
+for topic, valore in [("cmd/smart_port", 16), ("cmd/smart_port_a", 16),
                       ("cmd/smart_port_w", 16 * T.SMARTPORT_VOLTAGE)]:
     _, _, stati = scrivi(topic, valore)
-    coerenti = (stati.get("tbb/inverter/smart_port") == 50
+    coerenti = (stati.get("tbb/inverter/smart_port") == 16
                 and stati.get("tbb/inverter/smart_port_a") == 16
                 and stati.get("tbb/inverter/smart_port_w") == 16 * T.SMARTPORT_VOLTAGE)
     check(f"{topic} aggiorna le tre entita' in modo coerente", coerenti,
@@ -281,23 +286,40 @@ for topic, payload in [("cmd/smart_port", 150), ("cmd/smart_port", -5),
 check("cmd_smart_port rifiuta oltre 100", T.cmd_smart_port(101) is False)
 check("cmd_smart_port rifiuta sotto zero", T.cmd_smart_port(-1) is False)
 
-# mappatura alternativa: 0 % = 5 A invece di 0 A
-_a0 = T.SMARTPORT_A_AT_ZERO
-T.SMARTPORT_A_AT_ZERO = 5
-check("con 0 % = 5 A, meta' registro da 18-19 A",
-      round(T.register_to_amps(50)) in (18, 19), T.register_to_amps(50))
-check("con 0 % = 5 A, il minimo scrive 0 nel registro", T.amps_to_register(5) == 0)
-T.SMARTPORT_A_AT_ZERO = _a0
+# modalita' "percent": il registro torna a essere una percentuale, e le due
+# convenzioni possibili sull'estremo inferiore restano entrambe rappresentabili.
+_a0, _unita = T.SMARTPORT_A_AT_ZERO, T.SMARTPORT_REGISTER_UNIT
+T.SMARTPORT_REGISTER_UNIT = "percent"
+try:
+    check("in percent, 16 A torna a scrivere 50 nel registro",
+          T.amps_to_register(16) == 50, T.amps_to_register(16))
+    T.SMARTPORT_A_AT_ZERO = 5
+    check("con 0 % = 5 A, meta' registro da 18-19 A",
+          round(T.register_to_amps(50)) in (18, 19), T.register_to_amps(50))
+    check("con 0 % = 5 A, il minimo scrive 0 nel registro", T.amps_to_register(5) == 0)
+finally:
+    T.SMARTPORT_A_AT_ZERO, T.SMARTPORT_REGISTER_UNIT = _a0, _unita
 
-# discovery: tre slider, unita' diverse, stesso dispositivo
-sliders = {p["unit_of_measurement"]: p
+check("in modalita' ampere la conversione e' l'identita'",
+      T.amps_to_register(16) == 16 and T.register_to_amps(16) == 16)
+
+# discovery: tre slider, stesso dispositivo. Lo slider grezzo non dichiara
+# unita': in modalita' ampere chiamarlo "%" era meta' dell'equivoco.
+sliders = {p["unique_id"].rsplit("_", 0)[0].replace(f"{T.DEVICE_ID}_", ""): p
            for t, p in T.discovery_payloads() if "/number/" in t}
-check("discovery espone tre slider SmartPort", len(sliders) == 3, len(sliders))
-check("lo slider in % copre 0-100", sliders["%"]["min"] == 0 and sliders["%"]["max"] == 100)
+check("discovery espone tre slider SmartPort", len(sliders) == 3, sorted(sliders))
+check("lo slider grezzo copre 0-100",
+      sliders["smart_port"]["min"] == 0 and sliders["smart_port"]["max"] == 100)
+check("lo slider grezzo non dichiara un'unita' fuorviante",
+      "unit_of_measurement" not in sliders["smart_port"],
+      sliders["smart_port"].get("unit_of_measurement"))
 check("lo slider in A copre l'intervallo utile",
-      sliders["A"]["min"] == T.SMARTPORT_MIN_A and sliders["A"]["max"] == T.SMARTPORT_MAX_A)
+      sliders["smart_port_a"]["min"] == T.SMARTPORT_MIN_A
+      and sliders["smart_port_a"]["max"] == T.SMARTPORT_MAX_A)
+check("lo slider in A e' etichettato in ampere",
+      sliders["smart_port_a"]["unit_of_measurement"] == "A")
 check("lo slider in W avanza di un ampere alla volta",
-      sliders["W"]["step"] == T.SMARTPORT_VOLTAGE)
+      sliders["smart_port_w"]["step"] == T.SMARTPORT_VOLTAGE)
 check("i tre slider hanno topic di comando distinti",
       len({p["command_topic"] for p in sliders.values()}) == 3)
 
@@ -326,6 +348,9 @@ class FakeSerial:
         return len(b)
 
     def reset_input_buffer(self):
+        pass
+
+    def flush(self):
         pass
 
     def close(self):
@@ -391,9 +416,9 @@ for topic, p in items:
     assert topic.startswith("homeassistant/")
 check("ogni payload di discovery e' JSON valido e sotto il prefisso corretto", True)
 
-numbers = {p["unit_of_measurement"]: p for t, p in items if "/number/" in t}
-check("lo slider SmartPort in % scrive sul proprio topic",
-      numbers["%"]["command_topic"] == "tbb/inverter/cmd/smart_port")
+numbers = {t.rsplit("/", 2)[1]: p for t, p in items if "/number/" in t}
+check("lo slider SmartPort grezzo scrive sul proprio topic",
+      numbers["smart_port"]["command_topic"] == "tbb/inverter/cmd/smart_port")
 check("ogni entita' ha l'availability topic",
       all(p["availability_topic"] == "tbb/inverter/availability" for _, p in items))
 check("ogni entita' appartiene allo stesso dispositivo",
