@@ -10,8 +10,12 @@ configuration:
   poll_interval:
     name: Intervallo di polling
     description: >-
-      Secondi di pausa tra un ciclo di lettura e il successivo. 5 e' un buon
-      compromesso; valori bassi aumentano le scritture nel database.
+      Secondi di pausa tra un ciclo di lettura e il successivo. 30 e' il
+      valore predefinito e va bene per la maggior parte degli impianti: ogni
+      ciclo aggiorna 27 entita', quindi scendere a 5 secondi significa
+      sei volte piu' scritture nel database di Home Assistant. Su hardware
+      modesto (Raspberry Pi 3) tienilo alto; abbassalo solo se ti serve
+      davvero vedere le variazioni rapide di potenza.
   mqtt_host:
     name: Host MQTT
     description: >-
@@ -50,6 +54,13 @@ configuration:
       Scarta le risposte il cui CRC non e' valido invece di provare comunque a
       decodificarle. Attivalo solo dopo aver visto nel log che la verifica CRC
       funziona sul tuo inverter.
+  diag_frames:
+    name: Diagnostica dei frame
+    description: >-
+      Segnala nel log quali byte dei frame di lettura cambiano dopo essere
+      rimasti fermi per qualche ciclo. Serve a scoprire dove l'inverter
+      rilegge un parametro: attivalo, cambia il valore dall'app nativa e
+      guarda quale offset si muove. Tienilo spento nell'uso normale.
   smartport_register_unit:
     name: SmartPort - significato del registro
     description: >-

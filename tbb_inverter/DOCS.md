@@ -56,7 +56,7 @@ flusso.
 |---|---|---|
 | `serial_port` | `/dev/ttyUSB0` | Percorso della porta seriale dell'adattatore RS485. Vedi [porta seriale stabile](#-porta-seriale-stabile). |
 | `baudrate` | `9600` | Velocità della linea. L'inverter usa 9600: cambiala solo se sai cosa fai. |
-| `poll_interval` | `5` | Secondi di pausa tra un ciclo di lettura e il successivo (1-3600). |
+| `poll_interval` | `30` | Secondi di pausa tra un ciclo di lettura e il successivo (1-3600). |
 
 ### MQTT
 
@@ -82,18 +82,27 @@ flusso.
 | `strict_crc` | `false` | Scarta le risposte con CRC non valido invece di provare comunque a decodificarle. |
 | `smartport_register_unit` | `ampere` | Cosa contiene il registro `0x005E`: `ampere` (il numero **sono** gli ampere) o `percent`. Vedi la verifica nei [comandi](#-comandi-di-scrittura). |
 | `smartport_a_at_zero` | `0` | Solo con `percent`: corrente corrispondente al registro a 0. |
-| `smartport_min_a` | `5` | Estremo inferiore dello slider in ampere. |
+| `smartport_min_a` | `5` | Estremo inferiore dello slider in ampere. Sul RiiO Sun II il minimo è 5 A e l'inverter non scende sotto. |
 | `smartport_max_a` | `32` | Estremo superiore dello slider in ampere (e corrente a registro 100 con `percent`). |
-| `smartport_voltage` | `230` | Tensione usata per convertire ampere in watt nello slider in W. |
+| `smartport_voltage` | `230` | Tensione usata per convertire ampere in watt nello slider in W. Impostala alla tua tensione di rete reale (es. `251`) se vuoi che i watt dello slider corrispondano alla potenza misurata. |
 | `log_level` | `info` | `info` stampa la tabella dei valori ad ogni ciclo, `notice` solo gli eventi, `debug` aggiunge i frame esadecimali TX/RX. |
 
 ### Ogni quanto interrogare?
 
-| `poll_interval` | Quando ha senso |
-|:---:|---|
-| `2`-`3` | Vuoi reattività quasi in tempo reale (più scritture nel database di HA) |
-| `5` | **Consigliato** — buon compromesso tra dettaglio e carico |
-| `15`-`30` | Ti interessa solo l'andamento giornaliero, database più snello |
+Ogni ciclo aggiorna **27 topic**. Il costo non è la lettura in sé — che dura
+poche centinaia di millisecondi — ma il numero di aggiornamenti che ne derivano
+in Home Assistant.
+
+| `poll_interval` | Aggiornamenti al giorno | Quando ha senso |
+|:---:|---:|---|
+| `5` | ~467.000 | Solo se ti serve vedere le variazioni rapide di potenza, e HA gira su SSD |
+| `15` | ~156.000 | Buon dettaglio, carico contenuto |
+| `30` | ~78.000 | **Predefinito** — adatto a Raspberry Pi e microSD |
+| `60` | ~39.000 | Ti interessa soprattutto risparmiare scritture |
+| `300` | ~7.800 | Ti basta l'andamento giornaliero |
+
+> Su Raspberry Pi 3 con Home Assistant su microSD, `30` è il valore da cui
+> partire. Scendi solo se hai una ragione precisa per farlo.
 
 ---
 
@@ -140,9 +149,9 @@ le entità già configurate:
 | Potenza FV | W | `sensor.tbb_riio_sun_ii_pv_w` |
 | Tensione FV | V | `sensor.tbb_riio_sun_ii_pv_v` |
 | Corrente MPPT | A | `sensor.tbb_riio_sun_ii_mppt_i` |
-| Temperatura MPPT | °C | `sensor.tbb_riio_sun_ii_mppt_temp` |
+| Temperatura MPPT 🔧 | °C | `sensor.tbb_riio_sun_ii_mppt_temp` |
 | Tensione batteria | V | `sensor.tbb_riio_sun_ii_bat_v` |
-| Tensione batteria BMS | V | `sensor.tbb_riio_sun_ii_bat_v_bms` |
+| Tensione batteria BMS 🔧 | V | `sensor.tbb_riio_sun_ii_bat_v_bms` |
 | Corrente batteria | A | `sensor.tbb_riio_sun_ii_bat_i` |
 | **Potenza batteria** ⚙ | W | `sensor.tbb_riio_sun_ii_bat_w` |
 | Stato di carica | % | `sensor.tbb_riio_sun_ii_soc` |
@@ -151,11 +160,11 @@ le entità già configurate:
 | Tensione / Corrente / Potenza uscita AC | V / A / W | `sensor.tbb_riio_sun_ii_ac_out_v` … |
 | Tensione / Corrente / Potenza uscita AC 2 | V / A / W | `sensor.tbb_riio_sun_ii_ac_out2_v` … |
 | **Potenza uscita AC totale** ⚙ | W | `sensor.tbb_riio_sun_ii_ac_out_tot_w` |
-| Frequenza uscita | Hz | `sensor.tbb_riio_sun_ii_ac_freq` |
+| Frequenza uscita 🔧 | Hz | `sensor.tbb_riio_sun_ii_ac_freq` |
 | Carico | % | `sensor.tbb_riio_sun_ii_load_pct` |
 | Tensione / Corrente rete | V / A | `sensor.tbb_riio_sun_ii_ac_in_v` … |
 | **Potenza rete** ⚙ | W | `sensor.tbb_riio_sun_ii_ac_in_w` |
-| Temperature dissipatore / trasformatore / inverter | °C | *(diagnostica)* |
+| Temperature dissipatore / trasformatore / inverter 🔧 | °C | `sensor.tbb_riio_sun_ii_t_heatsink` … |
 | **SmartPort registro** *(scrivibile)* | — | `number.tbb_riio_sun_ii_smart_port` |
 | **SmartPort corrente** *(scrivibile)* | A | `number.tbb_riio_sun_ii_smart_port_a` |
 | **SmartPort potenza** *(scrivibile)* | W | `number.tbb_riio_sun_ii_smart_port_w` |
@@ -163,6 +172,13 @@ le entità già configurate:
 Le voci con ⚙ sono [canali calcolati](#-canali-calcolati). `bat_status` vale
 *In carica*, *In scarica* o *A riposo*, ricavato dal segno della corrente di
 batteria.
+
+Le voci con 🔧 sono **diagnostiche e nascono disabilitate**: servono a capire un
+problema, non a governare l'impianto, e restano quasi immobili per ore. Finché
+sono spente non producono stati e non finiscono nel database di Home Assistant.
+Per accenderne una: *Impostazioni → Dispositivi → TBB RiiO Sun II →
+Diagnostica*, poi l'interruttore nelle sue impostazioni. Non serve riavviare
+l'add-on.
 
 ### Disponibilità
 
@@ -288,17 +304,32 @@ Il registro `0x005E` dell'inverter accetta un valore **0-100**, e su questo
 firmware **quel numero sono gli ampere**: scrivere 20 imposta 20 A. Il
 comportamento osservato sul RiiO Sun II è:
 
-| Valore scritto | Effetto |
-|---|---|
-| 0 → 4 | sotto il minimo: la scrittura non ha effetto |
-| 5 → 32 | 5 A → 32 A, uno a uno |
-| oltre 32 | **fuori intervallo: l'inverter scarta la scrittura e resta a 5 A** |
+**Il dominio valido sono i numeri interi da 5 a 32**, un ampere alla volta.
+Lo conferma anche l'app nativa, che non lascia scendere sotto 5 A né usare
+valori frazionari. Fuori da quell'intervallo l'inverter accetta comunque la
+scrittura, ma l'effetto non è definito.
 
-L'ultima riga è la più insidiosa da diagnosticare: un valore rifiutato non
-satura al massimo, fa *ricadere* la SmartPort al minimo. «Resta sempre a 5 A»
-sembra una scrittura che non arriva, mentre in realtà arriva un numero che
-l'inverter non accetta. Per questo, dalla 1.3.2, il log avvisa **prima** di
-trasmettere quando il registro finisce fuori intervallo.
+**È un tetto, non un setpoint.** Il valore fissa il massimo che la SmartPort
+può erogare: si vede solo quando sta *sotto* a quanto il carico sta già
+chiedendo.
+
+> ⚠️ **Attenzione a come lo verifichi: il carico rende il test cieco.**
+> Il tetto più basso possibile è 5 A, cioè ~1,25 kW a 230 V (~1,26 kW a 251 V).
+> Se il carico attaccato alla SmartPort assorbe **meno** di così, *nessuna*
+> impostazione può avere un effetto visibile: le stai alzando tutte sopra la
+> testa del carico.
+>
+> Con un carico da 1,3 kW, 27 delle 28 impostazioni legali sono già sopra
+> l'assorbimento. La potenza resta identica per 6, 8, 16 e 32 A non perché la
+> scrittura fallisca, ma perché non c'è niente da limitare.
+>
+> **Per una verifica valida serve un carico che assorba almeno 2,5-3 kW**
+> (10-12 A). Allora impostando 5, 6, 7... 12 A la potenza deve seguire
+> `ampere × tensione di rete`, e si vede subito se la scala è 1:1.
+
+> L'inverter risponde con un ACK regolare — CRC valido e valore riecheggiato —
+> a **qualunque** valore, anche fuori scala. Non dice mai di no: un ACK conferma
+> che il frame è stato ricevuto, non che il parametro sia stato applicato.
 
 | Entità | Unità | Intervallo | Cosa scrive nel registro |
 |---|:---:|---|---|
@@ -358,6 +389,38 @@ conversione.
 > alcuna conversione, in entrambe le modalità: è la via di fuga se le altre
 > due dovessero sbagliare.
 
+#### Trovare dove l'inverter rilegge un parametro
+
+L'add-on scrive nei registri ma non sa rileggerli: senza riscontro, «non ha
+funzionato» e «ha funzionato ma non si vede» sono indistinguibili. L'opzione
+`diag_frames` colma il buco.
+
+I frame di lettura `C0`/`C1` sono lunghi ~198 byte e ne interpretiamo solo una
+ventina: il resto contiene quasi certamente anche i parametri di
+configurazione. Con `diag_frames: true` l'add-on confronta ogni frame con
+quello precedente e segnala i byte cambiati — ma **solo quelli rimasti fermi
+per almeno 3 cicli**. Le misure vive (tensioni, correnti, temperature)
+oscillano di continuo e si filtrano da sole; un parametro sta immobile finché
+qualcuno non lo cambia.
+
+**Procedura:**
+
+1. Attiva `diag_frames` e riavvia l'add-on.
+2. Lascia passare una decina di cicli senza toccare nulla.
+3. Cambia la SmartPort **dall'app nativa dell'inverter** (quella che
+   sicuramente funziona), non da Home Assistant.
+4. Guarda il log:
+
+```
+[NOTICE] DIAG C0[77 / 0x4D]: 05 -> 14  (5 -> 20, fermo da 12 cicli)  <-- OFFSET NON DECODIFICATO
+```
+
+Quell'offset è il punto in cui l'inverter rilegge la SmartPort, e i due valori
+dicono anche in che unità la esprime. Da lì si può esporla come sensore e
+verificare se le scritture dell'add-on attecchiscono davvero.
+
+Ricordati di rimettere `diag_frames: false` quando hai finito.
+
 #### Quando una scrittura non ha effetto
 
 Il log riporta l'intera catena, dal comando MQTT ai byte sulla linea. Con
@@ -380,6 +443,7 @@ Cosa guardare, nell'ordine:
 | «Conversione» mostra un registro diverso da quello atteso | è la modalità del registro: vedi la sezione sopra |
 | i tre `TX` ci sono ma l'inverter non cambia | i byte partono: confrontali con l'esempio stampato nel banner all'avvio |
 | «L'inverter non ha risposto a nessuno dei 3 frame» | plausibile se i sensori funzionano (alcuni firmware non rispondono alle scritture); se anche le letture sono ferme, il problema è la linea RS485 |
+| ogni `TX` ha il suo `RX` con il valore riecheggiato | **l'inverter ha accettato la scrittura**: il problema non è più nella trasmissione. Usa `diag_frames` per capire se il parametro cambia davvero |
 | «Porta seriale non disponibile» | l'adattatore USB non è aperto: vedi la sezione risoluzione dei problemi |
 
 ### Esito dei comandi
@@ -552,16 +616,24 @@ prima di essere elaborato.
 
 ### Il vero costo è il database di Home Assistant
 
-L'add-on è leggero, ma le **entità che crea non lo sono**: con
-`poll_interval: 5` una ventina di valori cambia ogni 5 secondi, e il *recorder*
-di Home Assistant li scrive tutti nel database. Sono centinaia di migliaia di
-righe al giorno.
+L'add-on è leggero, ma le **entità che crea non lo sono**: ogni ciclo aggiorna
+27 topic, e il *recorder* di Home Assistant scrive nel database ogni valore che
+cambia. Con `poll_interval: 5` sono centinaia di migliaia di righe al giorno.
+
+Per questo, dalla 1.3.3, i valori predefiniti sono più prudenti: `poll_interval`
+parte da **60 secondi** e le grandezze diagnostiche nascono **disabilitate**.
 
 Su Home Assistant installato su **microSD** questo è il singolo fattore che più
 logora la scheda, ed è una causa classica di sistemi che dopo mesi diventano
 instabili o non si avviano più. Due contromisure, entrambe utili:
 
-**1. Non registrare ciò che non ti serve.** In `configuration.yaml`:
+**1. Lascia spente le entità diagnostiche.** Temperature, tensione riportata dal
+BMS e frequenza di uscita nascono già disabilitate: non producono stati e non
+finiscono nel database finché non le abiliti tu. Le trovi nella sezione
+*Diagnostica* del dispositivo, e si accendono in due clic senza riavviare
+l'add-on. Se te ne serve una sola, abilita solo quella.
+
+**2. Non registrare ciò che non ti serve.** In `configuration.yaml`:
 
 ```yaml
 recorder:
@@ -573,8 +645,14 @@ recorder:
       - sensor.tbb_riio_sun_ii_ac_freq
 ```
 
-**2. Alza `poll_interval`.** Passare da 5 a 15 secondi riduce di due terzi le
-scritture e per l'andamento giornaliero non cambia nulla.
+**3. Alza `poll_interval`.** È la leva più diretta: il carico scala linearmente.
+Da 5 a 30 secondi le scritture scendono a un sesto, e per l'andamento
+giornaliero non cambia nulla.
+
+> ⚠️ **Se aggiorni da una versione precedente**, Home Assistant conserva le
+> opzioni che avevi salvato: il nuovo valore predefinito **non** ti viene
+> applicato da solo. Controlla `poll_interval` nella scheda Configurazione e
+> portalo a 30 a mano.
 
 Se puoi, **sposta Home Assistant su SSD o NVMe**: è il rimedio definitivo.
 

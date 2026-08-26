@@ -190,24 +190,24 @@ fuori = [(a, reg) for a, reg in
 check("ogni ampere dello slider produce un registro valido 0-100", not fuori, fuori)
 
 
-# --- 3. il sintomo osservato sul campo: "resta sempre a 5 A" -------------
-# Un registro fuori da MIN_A-MAX_A viene rifiutato dall'inverter, che ricade al
-# minimo. Con il fattore 3,125 della 1.3.1 questo accadeva da 11 A in su: 22
-# posizioni dello slider su 28 finivano a 5 A. Nessun ampere dello slider deve
-# piu' produrre un registro che l'inverter scarterebbe.
-rifiutati = [a for a in range(T.SMARTPORT_MIN_A, T.SMARTPORT_MAX_A + 1)
-             if not T.SMARTPORT_MIN_A <= registro_scritto(
-                 frame_da_topic("cmd/smart_port_a", a)) <= T.SMARTPORT_MAX_A]
-check("nessuna posizione dello slider produce un registro che l'inverter rifiuta",
-      not rifiutati, f"{len(rifiutati)} valori: {rifiutati[:8]}")
+# --- 3. nessuna scrittura esce dall'intervallo utile ----------------------
+# L'inverter conferma con un ACK regolare qualunque valore, anche fuori scala:
+# non c'e' un rifiuto su cui contare per accorgersi di un errore. L'unica
+# difesa e' che la conversione non produca mai un registro fuori da
+# MIN_A-MAX_A, che e' precisamente cio' che la 1.3.1 faceva da 11 A in su.
+fuori = [a for a in range(T.SMARTPORT_MIN_A, T.SMARTPORT_MAX_A + 1)
+         if not T.SMARTPORT_MIN_A <= registro_scritto(
+             frame_da_topic("cmd/smart_port_a", a)) <= T.SMARTPORT_MAX_A]
+check("nessuna posizione dello slider esce dall'intervallo utile",
+      not fuori, f"{len(fuori)} valori: {fuori[:8]}")
 
 # La stessa cosa in watt.
-rifiutati = [a for a in range(T.SMARTPORT_MIN_A, T.SMARTPORT_MAX_A + 1)
-             if not T.SMARTPORT_MIN_A <= registro_scritto(
-                 frame_da_topic("cmd/smart_port_w", a * T.SMARTPORT_VOLTAGE))
-             <= T.SMARTPORT_MAX_A]
-check("nemmeno lo slider in watt produce registri rifiutati",
-      not rifiutati, f"{len(rifiutati)} valori: {rifiutati[:8]}")
+fuori = [a for a in range(T.SMARTPORT_MIN_A, T.SMARTPORT_MAX_A + 1)
+         if not T.SMARTPORT_MIN_A <= registro_scritto(
+             frame_da_topic("cmd/smart_port_w", a * T.SMARTPORT_VOLTAGE))
+         <= T.SMARTPORT_MAX_A]
+check("nemmeno lo slider in watt esce dall'intervallo utile",
+      not fuori, f"{len(fuori)} valori: {fuori[:8]}")
 
 # Controprova: con la conversione della 1.3.1, 22 valori su 28 sarebbero
 # finiti fuori intervallo. Se questo controllo smette di valere, la formula

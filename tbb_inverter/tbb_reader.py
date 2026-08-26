@@ -51,7 +51,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 PORT          = os.environ.get("SERIAL_PORT", "/dev/ttyUSB0")
 BAUD          = _env_int("BAUD", 9600)
 TIMEOUT       = 2.0
-POLL_INTERVAL = _env_int("POLL_INTERVAL", 5)
+POLL_INTERVAL = _env_int("POLL_INTERVAL", 30)
 
 # MQTT
 MQTT_HOST     = os.environ.get("MQTT_HOST", "core-mosquitto")
@@ -86,6 +86,12 @@ SMARTPORT_MIN_A     = _env_int("SMARTPORT_MIN_A", 5)    # estremi utili dello sl
 SMARTPORT_MAX_A     = _env_int("SMARTPORT_MAX_A", 32)
 SMARTPORT_VOLTAGE   = _env_int("SMARTPORT_VOLTAGE", 230)
 STRICT_CRC        = _env_bool("STRICT_CRC", False)
+
+# Diagnostica: sorveglia i frame di lettura e segnala quali byte cambiano.
+# Serve a individuare dove l'inverter *rilegge* un parametro, l'unico modo per
+# sapere se una scrittura ha davvero avuto effetto invece di dedurlo.
+DIAG_FRAMES       = _env_bool("DIAG_FRAMES", False)
+DIAG_STABLE_CYCLES = 3    # cicli di immobilita' prima che un byte faccia notizia
 LOG_LEVEL         = os.environ.get("LOG_LEVEL", "info").strip().lower()
 ADDON_VERSION     = os.environ.get("ADDON_VERSION", "dev")
 
@@ -496,16 +502,15 @@ def cmd_smart_port(register: int) -> bool:
             register, amps, amps_to_watt(amps),
             "ampere" if _registro_in_ampere() else "percent")
 
-    # Un registro fuori dall'intervallo che l'inverter accetta non viene
-    # saturato: viene rifiutato, e la SmartPort ricade al proprio minimo. E'
-    # il sintomo che ha nascosto la regressione della 1.3.1 -- "resta sempre a
-    # 5 A" sembra una scrittura che non arriva, mentre arriva un numero che
-    # l'inverter scarta. Meglio dirlo prima di trasmettere.
+    # L'inverter conferma con un ACK regolare qualunque valore, anche fuori
+    # scala: non dice mai di no. Fuori dall'intervallo utile dichiarato non
+    # sappiamo pero' cosa ne faccia, quindi lo segnaliamo senza affermare un
+    # comportamento che non abbiamo osservato.
     if _registro_in_ampere() and not SMARTPORT_MIN_A <= register <= SMARTPORT_MAX_A:
-        log.warning("Il registro %d e' fuori dall'intervallo accettato (%d-%d): "
-                    "l'inverter con ogni probabilita' scartera' la scrittura e "
-                    "restera' al minimo di %d A.",
-                    register, SMARTPORT_MIN_A, SMARTPORT_MAX_A, SMARTPORT_MIN_A)
+        log.warning("Il registro %d e' fuori dall'intervallo utile dichiarato "
+                    "(%d-%d): l'inverter accettera' comunque la scrittura, ma "
+                    "l'effetto non e' verificato.",
+                    register, SMARTPORT_MIN_A, SMARTPORT_MAX_A)
     frames = [
         build_frame(0x66, 0x0073, 0x000A),   # sblocco 1
         build_frame(0x66, 0x0074, 0x000A),   # sblocco 2
@@ -626,6 +631,80 @@ def decode_c1(frame: bytes) -> dict:
 
 
 # ================================================================
+# Diagnostica dei frame
+# ================================================================
+
+# Offset gia' interpretati dai decoder: nel confronto vengono etichettati, cosi'
+# un byte che cambia si riconosce subito come misura nota o come incognita.
+_OFFSET_NOTI = {
+    "C0": {14: "ac_out_w", 15: "ac_out_w", 16: "ac_out2_v", 17: "ac_out2_v",
+           22: "ac_in_v", 23: "ac_in_v", 24: "ac_out_v", 25: "ac_out_v",
+           30: "ac_in_i", 31: "ac_in_i", 36: "ac_out_i", 37: "ac_out_i",
+           38: "ac_out2_i", 39: "ac_out2_i", 40: "ac_freq", 41: "ac_freq",
+           50: "bat_v", 51: "bat_v", 52: "bat_i", 53: "bat_i",
+           57: "t_transformer", 59: "t_heatsink", 61: "t_inverter",
+           67: "t_bat", 99: "load_pct", 155: "soc"},
+    "C1": {8: "pv_w", 9: "pv_w", 10: "mppt_i", 11: "mppt_i",
+           18: "bat_v_bms", 19: "bat_v_bms", 22: "pv_v", 23: "pv_v",
+           38: "mppt_temp", 39: "mppt_temp"},
+}
+
+# nome frame -> {"last": bytes, "fermo": [cicli di immobilita' per offset]}
+_diag_storia = {}
+
+
+def _hexdump(frame: bytes, per_riga: int = 16) -> str:
+    """Dump con offset decimali ed esadecimali, per leggerlo a occhio."""
+    righe = []
+    for base in range(0, len(frame), per_riga):
+        blocco = frame[base:base + per_riga]
+        righe.append(f"  {base:3d} 0x{base:02X} | {blocco.hex(' ').upper()}")
+    return "\n".join(righe)
+
+
+def diag_frame(nome: str, frame: bytes | None):
+    """
+    Confronta il frame con quello del ciclo precedente e segnala i byte
+    cambiati, ma solo quelli che erano fermi da almeno DIAG_STABLE_CYCLES.
+
+    Le misure vive (tensioni, correnti, temperature) ballano quasi ad ogni
+    ciclo e vengono cosi' filtrate da sole; un parametro di configurazione,
+    invece, resta immobile finche' qualcuno non lo cambia -- ed e' esattamente
+    quello che vogliamo vedere. Cambia la SmartPort dall'app nativa e il byte
+    che compare qui e' il punto in cui l'inverter la rilegge.
+    """
+    if not DIAG_FRAMES or not frame:
+        return
+
+    prec = _diag_storia.get(nome)
+    if prec is None or len(prec["last"]) != len(frame):
+        _diag_storia[nome] = {"last": frame, "fermo": [0] * len(frame)}
+        log.info("DIAG %s: frame di riferimento, %d byte\n%s",
+                 nome, len(frame), _hexdump(frame))
+        return
+
+    ultimo, fermo = prec["last"], prec["fermo"]
+    cambi = []
+    for i, byte in enumerate(frame):
+        if byte == ultimo[i]:
+            fermo[i] += 1
+        else:
+            if fermo[i] >= DIAG_STABLE_CYCLES:
+                cambi.append((i, ultimo[i], byte, fermo[i]))
+            fermo[i] = 0
+
+    for offset, prima, dopo, cicli in cambi:
+        etichetta = _OFFSET_NOTI.get(nome, {}).get(offset)
+        log.log(25, "DIAG %s[%d / 0x%02X]: %02X -> %02X  (%d -> %d, "
+                    "fermo da %d cicli)%s",
+                nome, offset, offset, prima, dopo, prima, dopo, cicli,
+                f"  gia' decodificato come {etichetta}" if etichetta
+                else "  <-- OFFSET NON DECODIFICATO")
+
+    prec["last"] = frame
+
+
+# ================================================================
 # Canali calcolati
 # ================================================================
 
@@ -682,6 +761,14 @@ def apply_derived(data: dict) -> dict:
 # ================================================================
 
 # key, nome, unita', device_class, state_class, icona, decimali, diagnostica
+#
+# L'ultimo campo marca le grandezze diagnostiche: finiscono nella sezione
+# "Diagnostica" del dispositivo e nascono **disabilitate**. Sono quelle che
+# servono a capire un problema, non a governare l'impianto -- temperature,
+# tensione riportata dal BMS, frequenza di uscita -- e restano quasi immobili
+# per ore. Tenerle spente evita di scrivere nel database di Home Assistant
+# valori che nessuno guarda; si abilitano dall'interfaccia in due clic, senza
+# riavviare l'add-on.
 SENSORS = [
     ("pv_v",          "Tensione FV",              "V",   "voltage",     "measurement", None,             1, False),
     ("mppt_i",        "Corrente MPPT",            "A",   "current",     "measurement", None,             2, False),
@@ -703,7 +790,7 @@ SENSORS = [
     ("ac_out2_i",     "Corrente uscita AC 2",     "A",   "current",     "measurement", None,             2, False),
     ("ac_out2_w",     "Potenza uscita AC 2",      "W",   "power",       "measurement", None,             0, False),
     ("ac_out_tot_w",  "Potenza uscita AC totale", "W",   "power",       "measurement", None,             0, False),
-    ("ac_freq",       "Frequenza uscita",         "Hz",  "frequency",   "measurement", None,             2, False),
+    ("ac_freq",       "Frequenza uscita",         "Hz",  "frequency",   "measurement", None,             2, True),
     ("load_pct",      "Carico",                   "%",   None,          "measurement", "mdi:gauge",      0, False),
 
     ("ac_in_v",       "Tensione rete",            "V",   "voltage",     "measurement", None,             1, False),
@@ -762,6 +849,9 @@ def discovery_payloads() -> list[tuple[str, dict]]:
             payload["suggested_display_precision"] = precision
         if diag:
             payload["entity_category"] = "diagnostic"
+            # Creata ma spenta: non produce stati e non finisce nel recorder
+            # finche' l'utente non la abilita.
+            payload["enabled_by_default"] = False
         items.append((f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/{key}/config", payload))
 
     # SmartPort: tre slider che scrivono lo stesso registro, in unita' diverse.
@@ -819,8 +909,11 @@ def publish_discovery(client: mqtt.Client, enabled: bool):
         body = json.dumps(payload, ensure_ascii=False) if enabled else ""
         client.publish(topic, body, retain=True)
     if enabled:
-        log.info("MQTT Discovery: %d entita' pubblicate sotto '%s/'",
-                 len(payloads), DISCOVERY_PREFIX)
+        spente = sum(1 for _, p in payloads
+                     if p.get("enabled_by_default") is False)
+        log.info("MQTT Discovery: %d entita' pubblicate sotto '%s/' "
+                 "(%d diagnostiche, disabilitate finche' non le abiliti)",
+                 len(payloads), DISCOVERY_PREFIX, spente)
     else:
         log.info("MQTT Discovery disabilitato: entita' rimosse da Home Assistant")
 
@@ -1086,6 +1179,10 @@ def banner():
              SMARTPORT_VOLTAGE)
     log.info("  Comandi:   %s/cmd/smart_port[_a|_w]  |  raw %s",
              MQTT_PREFIX, "abilitato" if ALLOW_RAW_COMMAND else "disabilitato")
+    if DIAG_FRAMES:
+        log.info("  DIAGNOSTICA FRAME ATTIVA: verranno segnalati i byte che "
+                 "cambiano dopo essere stati fermi almeno %d cicli.",
+                 DIAG_STABLE_CYCLES)
 
     # Frame di riferimento: si confrontano a occhio con una cattura dell'app
     # nativa senza dover far partire una scrittura.
@@ -1101,6 +1198,9 @@ def poll_once(ser: serial.Serial) -> dict:
     fc0 = read_frame(ser, CMD_C0, 0xC0)
     time.sleep(0.1)
     fc1 = read_frame(ser, CMD_C1, 0xC1)
+
+    diag_frame("C0", fc0)
+    diag_frame("C1", fc1)
 
     data = {}
     if fc0:

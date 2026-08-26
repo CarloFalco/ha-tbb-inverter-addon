@@ -431,6 +431,29 @@ check("il sensore potenza FV ha device_class/state_class corretti",
 check("il sensore testuale bat_status non ha unita' o device_class",
       "unit_of_measurement" not in [p for t, p in items if t.endswith("/bat_status/config")][0])
 
+# --- carico su Home Assistant --------------------------------------------
+# Le grandezze diagnostiche nascono spente: non producono stati e non finiscono
+# nel recorder finche' l'utente non le abilita. Su un Raspberry Pi 3 la mole di
+# scritture e' il vero costo dell'add-on, non la CPU.
+sensori_diag = [p for t, p in items
+                if "/sensor/" in t and p.get("entity_category") == "diagnostic"]
+check("le grandezze diagnostiche esistono", len(sensori_diag) >= 5, len(sensori_diag))
+check("ogni sensore diagnostico nasce disabilitato",
+      all(p.get("enabled_by_default") is False for p in sensori_diag),
+      [p["unique_id"] for p in sensori_diag if p.get("enabled_by_default") is not False])
+check("la frequenza di uscita e' fra le diagnostiche",
+      any(p["unique_id"].endswith("_ac_freq") for p in sensori_diag))
+check("le grandezze operative restano abilitate",
+      all("enabled_by_default" not in p for t, p in items
+          if "/sensor/" in t and p.get("entity_category") != "diagnostic"))
+
+# I tre slider SmartPort servono a governare l'impianto: non vanno spenti.
+check("gli slider SmartPort restano abilitati",
+      all("enabled_by_default" not in p for t, p in items if "/number/" in t))
+
+check("l'intervallo di polling predefinito e' prudente per hardware modesto",
+      T.POLL_INTERVAL >= 30, T.POLL_INTERVAL)
+
 mc2 = FakeClient()
 T.publish_discovery(mc2, False)
 check("discovery disabilitato rimuove le entita' (payload vuoto)",

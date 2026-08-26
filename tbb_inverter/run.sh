@@ -4,7 +4,7 @@ set -e
 
 export SERIAL_PORT BAUD POLL_INTERVAL
 export MQTT_HOST MQTT_PORT MQTT_USER MQTT_PASS MQTT_PREFIX
-export MQTT_DISCOVERY DISCOVERY_PREFIX ALLOW_RAW_COMMAND STRICT_CRC
+export MQTT_DISCOVERY DISCOVERY_PREFIX ALLOW_RAW_COMMAND STRICT_CRC DIAG_FRAMES
 export SMARTPORT_MIN_A SMARTPORT_MAX_A SMARTPORT_VOLTAGE SMARTPORT_A_AT_ZERO
 export SMARTPORT_REGISTER_UNIT
 export LOG_LEVEL ADDON_VERSION
@@ -17,6 +17,7 @@ MQTT_DISCOVERY=$(bashio::config 'mqtt_discovery')
 DISCOVERY_PREFIX=$(bashio::config 'discovery_prefix')
 ALLOW_RAW_COMMAND=$(bashio::config 'allow_raw_command')
 STRICT_CRC=$(bashio::config 'strict_crc')
+DIAG_FRAMES=$(bashio::config 'diag_frames')
 SMARTPORT_REGISTER_UNIT=$(bashio::config 'smartport_register_unit')
 SMARTPORT_A_AT_ZERO=$(bashio::config 'smartport_a_at_zero')
 SMARTPORT_MIN_A=$(bashio::config 'smartport_min_a')

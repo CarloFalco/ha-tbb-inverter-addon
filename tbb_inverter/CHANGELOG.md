@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3.2
+## 1.3.3
 
 ### 🐛 La SmartPort torna a rispondere
 
@@ -21,20 +21,23 @@ identici a quelli della primissima versione funzionante per **ogni** valore da
 regredito: c'e' un test che lo confronta con il sorgente preso da git. La
 regressione era solo nel numero che arrivava fin li'.
 
-**Perche' sembrava che non arrivasse nulla.** Un registro fuori dall'intervallo
-accettato non viene saturato: viene *rifiutato*, e la SmartPort ricade al
-minimo di 5 A. Con il fattore 3,125 questo succedeva da 11 A in su -- 22
-posizioni dello slider su 28:
+**Quanto era sbagliato il valore.** Con il fattore 3,125, da 11 A in su il
+registro finiva oltre il fondoscala utile -- 22 posizioni dello slider su 28:
 
-| Slider in ampere | Registro scritto | Esito sull'inverter |
+| Slider in ampere | Registro scritto | Dentro l'intervallo utile? |
 |---|---|---|
-| 5 - 10 A | 16 - 31 | accettato, ma corrente sbagliata (16-31 A) |
-| **11 - 32 A** | **34 - 100** | **rifiutato: resta a 5 A** |
+| 5 - 10 A | 16 - 31 | si', ma corrente sbagliata (16-31 A) |
+| **11 - 32 A** | **34 - 100** | **no, oltre il fondoscala** |
 
-Qualunque valore d'uso reale cadeva nella seconda riga. Il sintomo -- "resta
-sempre a 5 A qualunque cosa imposti" -- somiglia a una scrittura che non parte,
-ed e' cio' che aveva portato la 1.3.1 a cercare la causa nella premessa
-sbagliata.
+Qualunque valore d'uso reale cadeva nella seconda riga.
+
+> **Nota sulla SmartPort.** Le prove sul campo mostrano che il registro fissa
+> un **tetto** di corrente, non un valore da erogare: si vede solo quando sta
+> sotto a quanto il carico sta gia' chiedendo. Con un carico da 5,3 A,
+> impostare 6, 8 o 16 A non cambia nulla, e non perche' la scrittura fallisca.
+> L'inverter, dal canto suo, risponde con un ACK regolare (CRC valido, valore
+> riecheggiato) a qualunque valore, anche fuori scala: l'ACK conferma la
+> ricezione del frame, non l'applicazione del parametro.
 
 **Correzione.** Ampere e watt tornano a scrivere il valore che l'inverter si
 aspetta:
@@ -74,11 +77,59 @@ la meta' cosmetica dello stesso equivoco. Si chiama ora **SmartPort registro**
   dice quale porta e quanti frame sono stati scartati, invece di un generico
   "non disponibile".
 - **Avviso prima di trasmettere** quando il valore di registro cade fuori
-  dall'intervallo accettato dall'inverter: e' il caso che fa ricadere la
-  SmartPort al minimo, e non e' distinguibile a occhio da una scrittura persa.
+  dall'intervallo utile dichiarato. L'inverter lo accettera' comunque -- non
+  rifiuta nulla -- ma l'effetto non e' verificato.
 - Il banner di avvio stampa i **frame di riferimento** per gli estremi dello
   slider: si confrontano a occhio con una cattura dell'app nativa senza dover
   far partire una scrittura.
+
+### 🍂 Meno carico su Home Assistant
+
+Su un Raspberry Pi 3 il costo di questo add-on non e' la CPU -- il ciclo di
+lettura dura poche centinaia di millisecondi -- ma il numero di aggiornamenti
+che riversa in Home Assistant. Ogni ciclo tocca 27 topic, e il recorder scrive
+nel database ogni valore che cambia. Due valori predefiniti sono stati
+ricalibrati di conseguenza:
+
+- **`poll_interval` passa da 5 a 30 secondi.** Il carico scala linearmente:
+  si passa da ~467.000 aggiornamenti al giorno a ~78.000. Per l'andamento
+  giornaliero non cambia nulla; chi vuole vedere le variazioni rapide di
+  potenza puo' sempre riabbassarlo, l'opzione e' sempre esistita ed accetta
+  1-3600 secondi.
+- **Le grandezze diagnostiche nascono disabilitate.** Temperature (MPPT,
+  dissipatore, trasformatore, inverter), tensione riportata dal BMS e
+  frequenza di uscita -- sei entita' -- servono a capire un problema, non a
+  governare l'impianto, e restano quasi immobili per ore. Finche' sono spente
+  non producono stati e non finiscono nel database. Si accendono dalla sezione
+  *Diagnostica* del dispositivo, in due clic e senza riavviare l'add-on.
+
+La frequenza di uscita e' stata spostata fra le diagnostiche: e' bloccata sul
+valore di rete per giorni interi. La temperatura della batteria resta invece
+fra le grandezze normali, perche' e' l'unica temperatura con valore operativo.
+
+> ⚠️ **Aggiornando da una versione precedente**, Home Assistant conserva le
+> opzioni gia' salvate: il nuovo `poll_interval` **non** viene applicato da
+> solo. Controllalo nella scheda Configurazione e portalo a 30 a mano.
+
+### 🔎 Diagnostica: trovare dove l'inverter rilegge un parametro
+
+Nuova opzione `diag_frames`. L'add-on scrive nei registri ma non sa rileggerli:
+senza riscontro, "non ha funzionato" e "ha funzionato ma non si vede" sono
+indistinguibili, ed e' esattamente l'ambiguita' in cui si erano arenate le due
+diagnosi precedenti.
+
+Attivandola, ogni frame di lettura viene confrontato con il precedente e i byte
+cambiati vengono segnalati -- ma solo quelli fermi da almeno 3 cicli. Le misure
+vive oscillano di continuo e si filtrano da sole; un parametro di
+configurazione resta immobile finche' qualcuno non lo cambia:
+
+```
+[NOTICE] DIAG C0[77 / 0x4D]: 05 -> 14  (5 -> 20, fermo da 12 cicli)  <-- OFFSET NON DECODIFICATO
+```
+
+Si attiva, si cambia il valore **dall'app nativa** e si legge quale offset si
+muove: quello e' il punto in cui l'inverter rilegge il parametro, e i due
+valori ne rivelano anche l'unita'. Da spegnere quando non serve.
 
 ### 🛡 Correzioni minori
 
