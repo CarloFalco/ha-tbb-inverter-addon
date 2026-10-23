@@ -373,7 +373,7 @@ rifiutato senza trasmettere un solo byte.
 > creduti uno «sblocco», che in realtà impostavano a **10** il *ritardo di
 > commutazione batteria → rete* e il *ritardo rete → batteria* (registri
 > `0x0073` e `0x0074`). Se i tuoi valori erano diversi, vanno ripristinati
-> dall'app. Dalla 1.3.4 l'add-on non li tocca più. Dettagli in
+> dall'app. Dalla 2.0.1 l'add-on non li tocca più. Dettagli in
 > [`PROTOCOLLO.md`](https://github.com/CarloFalco/ha-tbb-inverter-addon/blob/main/PROTOCOLLO.md).
 
 #### Modalità della SmartPort
@@ -578,7 +578,7 @@ quelle del generatore si muovono.
 
 > ⚠️ **Se aggiorni da una versione fino alla 1.3.3**, la tensione che vedevi
 > come «Tensione rete» era in realtà quella del **generatore**, e la «Frequenza
-> uscita» era quella della **rete**. Dalla 1.3.4 ogni grandezza è al suo posto:
+> uscita» era quella della **rete**. Dalla 2.0.1 ogni grandezza è al suo posto:
 > lo storico di quelle due entità cambia significato da quel momento.
 
 ### 🔋 Controlli della batteria

@@ -120,7 +120,7 @@ eco — e li copia in un'immagine del banco a partire dal registro della
 
 🔎 **Eccezioni**: una scrittura rifiutata riceve una risposta di tipo `0x86`
 (`0x80 | 0x06`), come in Modbus. L'app la gestisce in un ramo a parte; dalla
-1.3.4 l'add-on la tratta come errore.
+2.0.1 l'add-on la tratta come errore.
 
 **Ogni scrittura è un frame singolo.** L'app non invia alcuna sequenza di
 sblocco prima di modificare un parametro. 🔎
@@ -148,7 +148,7 @@ dell'interfaccia: 🔎
 | `0x0074` | `Edt_UtilityToBatDelay` | ritardo di commutazione rete → batteria |
 
 La sequenza catturata in origine era probabilmente l'invio di tre campi della
-stessa schermata, due dei quali valevano 10. Dalla 1.3.4 l'add-on scrive solo
+stessa schermata, due dei quali valevano 10. Dalla 2.0.1 l'add-on scrive solo
 `0x005E`. **Chi ha usato le versioni precedenti dovrebbe controllare nell'app i
 due ritardi**: a ogni comando SmartPort venivano riportati a 10.
 
@@ -188,7 +188,7 @@ quindi dal solo codice dell'interfaccia non si ricava in quale modalità abbia
 effetto. ❓ Le prove sul campo — potenza piatta qualunque valore si imposti, con
 un carico da 1,3 kW sulla SmartPort — sono compatibili con un parametro che in
 modalità *Smart Load* non agisce affatto. La rilettura di `0x001F` dopo ogni
-scrittura (dalla 1.3.4) lo chiarirà.
+scrittura (dalla 2.0.1) lo chiarirà.
 
 ---
 
