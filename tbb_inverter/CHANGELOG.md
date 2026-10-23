@@ -1,5 +1,105 @@
 # Changelog
 
+## 1.3.4
+
+### ⚠️ La SmartPort non sovrascrive più due parametri dell'inverter
+
+Fino alla 1.3.3 ogni scrittura della SmartPort era preceduta da due frame
+ritenuti uno "sblocco": `0x66` sui registri `0x0073` e `0x0074`, valore 10.
+L'analisi dell'app ufficiale TBBLink mostra che quei due registri sono
+**normali parametri** dell'inverter, presi da due campi della sua schermata:
+
+| Registro | Parametro |
+|:---:|---|
+| `0x0073` | ritardo di commutazione batteria → rete |
+| `0x0074` | ritardo di commutazione rete → batteria |
+
+A ogni comando SmartPort, quindi, entrambi venivano riportati a 10. L'app
+scrive ogni parametro con un **frame singolo**, senza alcuno sblocco, e dalla
+1.3.4 l'add-on fa lo stesso: il frame su `0x005E` è identico byte per byte a
+quello di prima, gli altri due spariscono.
+
+> **Se hai usato una versione precedente**, apri l'app TBBLink e controlla i
+> due ritardi di commutazione: se i tuoi valori originali non erano 10, vanno
+> ripristinati.
+
+### 🐛 Tre misure erano lette dai byte sbagliati
+
+Il pannello di monitoraggio dell'app TBBLink mostra, per il RiiO Sun II, quale
+coppia di byte del frame `C0` corrisponde a ogni grandezza. Confrontato con
+l'add-on:
+
+| Entità | Leggeva | In realtà era | Ora legge |
+|---|:---:|---|:---:|
+| Tensione rete (`ac_in_v`) | byte 22 | la tensione del **generatore** | byte 20 |
+| Tensione uscita AC 2 (`ac_out2_v`) | byte 16 | la **potenza** dell'uscita 2 | byte 28 |
+| Frequenza uscita (`ac_freq`) | byte 40 | la frequenza della **rete** | byte 44 |
+
+Era la causa del bilancio energetico che non tornava: 235 V «di rete» con 0 A e
+0 Hz, e centinaia di watt di carico dal nulla. La rete era assente e l'energia
+entrava dal generatore, che non veniva letto.
+
+Anche la tensione di uscita (`ac_out_v`) passa al byte 26, quello che l'app
+mostra come uscita AC: il 24 è la tensione dello stadio inverter. E le
+correnti e potenze delle uscite ora sono lette **con segno**, come fa l'app.
+
+> ⚠️ Lo storico di «Tensione rete» e «Frequenza uscita» cambia significato con
+> questa versione: prima erano un'altra grandezza.
+
+### ✨ Novità
+
+- **Ingresso generatore.** Nuove entità `gen_v`, `gen_i`, `gen_w`,
+  `gen_freq`: è da qui che entra l'energia quando la SmartPort lavora come
+  *Smart Gen*. Nuova anche la frequenza di rete (`ac_in_freq`, diagnostica).
+- **Potenze misurate, non più calcolate.** `ac_in_w` e `ac_out2_w` erano il
+  prodotto V × A di due grandezze lette male; ora sono le potenze che
+  l'inverter misura e riporta.
+- **Carica completa della batteria** come interruttore
+  (`switch.tbb_riio_sun_ii_bat_full_charge`): comando `0x00` sul registro
+  `0x03F3`, lo stesso frame dell'app. Come l'app, non può rileggere lo stato:
+  l'interruttore mostra l'ultimo comando inviato.
+- **Capacità riservata della batteria** (SOC minimo, 0-100 %) come numero
+  scrivibile (`number.tbb_riio_sun_ii_bat_reserved_capacity`): banco B,
+  registro `0x0072`, con rilettura dopo ogni modifica.
+- **Modalità SmartPort** come sensore (`sensor.tbb_riio_sun_ii_smart_port_mode`).
+- **Rilettura periodica.** Ogni 10 minuti l'add-on rilegge corrente e modalità
+  della SmartPort e capacità riservata: le entità mostrano i valori
+  dell'inverter, anche se cambiati dall'app o dal pannello.
+- **Le eccezioni dell'inverter sono riconosciute.** Una scrittura rifiutata
+  riceve una risposta di tipo `0x86`; ora il comando fallisce con `ERRORE`
+  invece di risultare riuscito.
+- **Rilettura dopo ogni scrittura.** L'inverter conferma con un eco qualunque
+  valore, anche quelli che poi non applica: l'eco dice che il frame è
+  arrivato, non che sia stato memorizzato. Dopo ogni comando l'add-on rilegge
+  `0x005E` e la **modalità della SmartPort** (`0x001F`: Smart Load, Smart Gen,
+  City GEN) e lo riporta nel log, segnalando un avviso se il valore letto non
+  coincide con quello scritto.
+- **Nuova opzione `diag_params`.** Al primo ciclo riuscito legge i blocchi di
+  parametri che l'app ufficiale legge per la sua schermata impostazioni e li
+  riporta nel log, con il nome del campo corrispondente. Non modifica nulla.
+  Serve a confermare sul campo il formato delle risposte, ricavato dal codice
+  dell'app ma non ancora osservato su un inverter.
+- **Mappa del protocollo** in [`PROTOCOLLO.md`](https://github.com/CarloFalco/ha-tbb-inverter-addon/blob/main/PROTOCOLLO.md): formato dei
+  frame, due banchi di parametri (lettura `0x03`/`0x33`, scrittura
+  `0x06`/`0x66`) e oltre 90 parametri scrivibili con il campo dell'app da cui
+  provengono. Ogni voce è marcata come verificata, ricavata o dedotta.
+
+### 🔎 Cosa è `0x005E`
+
+Nell'app ufficiale il registro corrisponde al campo *corrente massima del
+generatore*. È un indizio forte sul perché, con la SmartPort che alimenta un
+carico, il valore impostato non abbia effetto visibile: in modalità *Smart
+Load* è il limite di un generatore che non c'è. La rilettura della modalità lo
+confermerà.
+
+### 🔧 Sviluppo
+
+- Nuova suite `tests/test_protocollo.py`: frame di lettura confrontati con i
+  modelli trovati nell'app, decodifica delle risposte, rilettura, mappa.
+- Il test di regressione SmartPort ora verifica che il frame su `0x005E` resti
+  identico all'originale **e** che non ci siano altre scritture.
+- `Bin/` (il software del produttore usato per l'analisi) è escluso da git.
+
 ## 1.3.3
 
 ### 🐛 La SmartPort torna a rispondere

@@ -60,6 +60,13 @@ configuration:
       few cycles. Use it to find where the inverter reads a parameter back:
       turn it on, change the value from the native app, and watch which offset
       moves. Leave it off in normal use.
+  diag_params:
+    name: Parameter diagnostics
+    description: >-
+      On the first successful cycle, reads the inverter configuration
+      parameters the way the official TBBLink app does, and logs them next to
+      the matching field name, so they can be compared with the app's screen.
+      Reading changes nothing. Leave it off in normal use.
   smartport_register_unit:
     name: SmartPort - register meaning
     description: >-

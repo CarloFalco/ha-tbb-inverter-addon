@@ -85,17 +85,31 @@ check("build_frame produce il frame documentato",
 
 
 # ---------------------------------------------------------------- frame finto
+def be(v):
+    """Intero con segno -> 2 byte big-endian."""
+    return (v & 0xFFFF).to_bytes(2, "big")
+
+
+# Offset del pannello di monitoraggio dell'app TBBLink per il RiiO Sun II.
 def make_c0():
     f = bytearray(198)
     f[0:6] = bytes([0x7E, 0xFF, 0x11, 0x03, 0xC0, 0x9C])
-    f[14:16] = (1116).to_bytes(2, "big")        # ac_out_w
-    f[16:18] = (2301).to_bytes(2, "big")        # ac_out2_v -> 230.1
-    f[22:24] = (2310).to_bytes(2, "big")        # ac_in_v   -> 231.0
-    f[24:26] = (2302).to_bytes(2, "big")        # ac_out_v  -> 230.2
-    f[30:32] = (-12 & 0xFFFF).to_bytes(2, "big")  # ac_in_i -> -0.12
-    f[36:38] = (485).to_bytes(2, "big")         # ac_out_i  -> 4.85
-    f[38:40] = (100).to_bytes(2, "big")         # ac_out2_i -> 1.00
-    f[40:42] = (5001).to_bytes(2, "big")        # ac_freq   -> 50.01
+    f[8:10]  = be(-28)          # ac_in_w   -> -28 W
+    f[10:12] = be(1320)         # gen_w     -> 1320 W
+    f[14:16] = be(1116)         # ac_out_w
+    f[16:18] = be(230)          # ac_out2_w -> 230 W
+    f[20:22] = be(2310)         # ac_in_v   -> 231.0
+    f[22:24] = be(2512)         # gen_v     -> 251.2
+    f[24:26] = be(2299)         # tensione dell'inverter: non piu' pubblicata
+    f[26:28] = be(2302)         # ac_out_v  -> 230.2
+    f[28:30] = be(2301)         # ac_out2_v -> 230.1
+    f[30:32] = be(-12)          # ac_in_i   -> -0.12
+    f[32:34] = be(526)          # gen_i     -> 5.26
+    f[36:38] = be(485)          # ac_out_i  -> 4.85
+    f[38:40] = be(100)          # ac_out2_i -> 1.00
+    f[40:42] = be(0)            # ac_in_freq  -> 0.00 (rete assente)
+    f[42:44] = be(5002)         # gen_freq    -> 50.02
+    f[44:46] = be(5001)         # ac_freq     -> 50.01 (uscita)
     f[50:52] = (53412).to_bytes(2, "big")       # bat_v     -> 53.412
     f[52:54] = (142).to_bytes(2, "big")         # bat_i     -> 14.2
     f[57], f[59], f[61], f[67] = 44, 38, 35, 21
@@ -111,12 +125,23 @@ check("il frame di prova ha un CRC coerente", T.crc_frame_length(c0) == 198, T.c
 
 d = T.decode_c0(c0)
 expected = {"ac_out_w": 1116, "ac_out_v": 230.2, "ac_out_i": 4.85, "ac_in_v": 231.0,
-            "ac_in_i": -0.12, "ac_freq": 50.01, "bat_v": 53.412, "bat_i": 14.2,
+            "ac_in_i": -0.12, "ac_in_w": -28, "ac_in_freq": 0.0, "ac_freq": 50.01,
+            "gen_v": 251.2, "gen_i": 5.26, "gen_w": 1320, "gen_freq": 50.02,
+            "ac_out2_v": 230.1, "ac_out2_i": 1.0, "ac_out2_w": 230,
+            "bat_v": 53.412, "bat_i": 14.2,
             "soc": 87, "load_pct": 14, "t_heatsink": 38, "t_transformer": 44,
             "t_inverter": 35, "t_bat": 21}
 for k, v in expected.items():
     check(f"decode_c0 {k} = {v}", abs(d[k] - v) < 1e-6 if isinstance(v, float) else d[k] == v,
           d.get(k))
+
+# Il byte 22 e' la tensione del generatore, non della rete: era la mappatura
+# sbagliata che faceva comparire 235 V "di rete" con 0 A e 0 Hz.
+check("il byte 22 e' la tensione del generatore", d["gen_v"] == 251.2 and d["ac_in_v"] == 231.0)
+check("il byte 40 e' la frequenza della rete, il 44 quella di uscita",
+      d["ac_in_freq"] == 0.0 and d["ac_freq"] == 50.01)
+check("le correnti delle uscite sono con segno",
+      T.decode_c0(c0[:36] + be(-485) + c0[38:])["ac_out_i"] == -4.85)
 
 # frame troncato: le chiavi mancanti NON devono comparire (niente zeri finti)
 short = T.decode_c0(c0[:60])
@@ -129,11 +154,10 @@ der = T.apply_derived(T.decode_c0(c0))
 check("bat_w = tensione x corrente batteria",
       abs(der["bat_w"] - round(53.412 * 14.2, 1)) < 1e-9, der.get("bat_w"))
 check("bat_w e' positiva quando la batteria carica", der["bat_w"] > 0)
-check("ac_in_w = tensione x corrente di rete",
-      der["ac_in_w"] == round(231.0 * -0.12), der.get("ac_in_w"))
-check("ac_in_w e' negativa quando si preleva dalla rete", der["ac_in_w"] < 0)
-check("ac_out2_w = tensione x corrente uscita 2",
-      der["ac_out2_w"] == round(230.1 * 1.00), der.get("ac_out2_w"))
+check("ac_in_w e' la potenza misurata dall'inverter, non un prodotto V x I",
+      der["ac_in_w"] == -28, der.get("ac_in_w"))
+check("ac_out2_w e' la potenza misurata dall'inverter",
+      der["ac_out2_w"] == 230, der.get("ac_out2_w"))
 check("ac_out_tot_w somma le due uscite",
       der["ac_out_tot_w"] == der["ac_out_w"] + der["ac_out2_w"], der.get("ac_out_tot_w"))
 check("bat_status In carica", der["bat_status"] == "In carica")
@@ -156,10 +180,11 @@ check("un frame corto non produce potenze fittizie",
 check("apply_derived su un dizionario vuoto non solleva",
       T.apply_derived({}) == {})
 
-# ac_out_tot_w dipende da ac_out2_w, a sua volta calcolato: l'ordine deve reggere
-catena = T.apply_derived({"ac_out_w": 1000, "ac_out2_v": 230.0, "ac_out2_i": 2.0})
-check("i canali calcolati possono dipendere l'uno dall'altro",
-      catena["ac_out_tot_w"] == 1000 + catena["ac_out2_w"], catena.get("ac_out_tot_w"))
+# le potenze misurate non vengono ricalcolate (ne' sovrascritte) da V x I
+check("ac_out2_w non viene ricalcolata da tensione e corrente",
+      "ac_out2_w" not in T.apply_derived({"ac_out2_v": 230.0, "ac_out2_i": 2.0}))
+check("ac_in_w non viene ricalcolata da tensione e corrente",
+      "ac_in_w" not in T.apply_derived({"ac_in_v": 230.0, "ac_in_i": -2.0}))
 
 # ogni canale calcolato deve avere un'entita' in Home Assistant
 sensor_keys = {row[0] for row in T.SENSORS}
@@ -305,8 +330,9 @@ check("in modalita' ampere la conversione e' l'identita'",
 
 # discovery: tre slider, stesso dispositivo. Lo slider grezzo non dichiara
 # unita': in modalita' ampere chiamarlo "%" era meta' dell'equivoco.
-sliders = {p["unique_id"].rsplit("_", 0)[0].replace(f"{T.DEVICE_ID}_", ""): p
-           for t, p in T.discovery_payloads() if "/number/" in t}
+sliders = {p["unique_id"].replace(f"{T.DEVICE_ID}_", ""): p
+           for t, p in T.discovery_payloads()
+           if "/number/" in t and "/smart_port" in t}
 check("discovery espone tre slider SmartPort", len(sliders) == 3, sorted(sliders))
 check("lo slider grezzo copre 0-100",
       sliders["smart_port"]["min"] == 0 and sliders["smart_port"]["max"] == 100)
@@ -407,8 +433,22 @@ check("il JSON aggregato contiene solo le chiavi lette", set(payload) == {"pv_w"
 
 # ---------------------------------------------------------------- discovery
 items = T.discovery_payloads()
-check("discovery genera un'entita' per sensore + i tre slider SmartPort",
-      len(items) == len(T.SENSORS) + 3, len(items))
+# sensori + 3 slider SmartPort + modalita' SmartPort + carica completa + capacita' riservata
+check("discovery genera un'entita' per sensore + i controlli",
+      len(items) == len(T.SENSORS) + 6, len(items))
+per_tipo = {t.split("/")[1] for t, _ in items}
+check("discovery usa sensor, number e switch", per_tipo == {"sensor", "number", "switch"}, per_tipo)
+sw = [p for t, p in items if "/switch/" in t]
+check("la carica completa e' un interruttore con ON/OFF",
+      len(sw) == 1 and sw[0]["payload_on"] == "ON" and sw[0]["payload_off"] == "OFF"
+      and sw[0]["command_topic"] == "tbb/inverter/cmd/bat_full_charge", sw)
+riserva = [p for t, p in items if t.endswith("/bat_reserved_capacity/config")]
+check("la capacita' riservata e' un numero 0-100 %",
+      len(riserva) == 1 and (riserva[0]["min"], riserva[0]["max"], riserva[0]["step"]) == (0, 100, 1)
+      and riserva[0]["unit_of_measurement"] == "%", riserva)
+gen = {p["unique_id"].replace(f"{T.DEVICE_ID}_", "") for t, p in items if "/sensor/" in t}
+check("le grandezze del generatore hanno la loro entita'",
+      {"gen_v", "gen_i", "gen_w", "gen_freq"} <= gen, sorted(gen))
 check("i topic di discovery sono unici", len({t for t, _ in items}) == len(items))
 check("gli unique_id sono unici", len({p["unique_id"] for _, p in items}) == len(items))
 for topic, p in items:

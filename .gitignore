@@ -3,3 +3,7 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
+
+# Software del produttore usato per ricavare il protocollo: binari
+# proprietari, non vanno pubblicati con l'add-on.
+Bin/

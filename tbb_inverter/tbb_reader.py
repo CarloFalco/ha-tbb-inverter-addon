@@ -91,6 +91,9 @@ STRICT_CRC        = _env_bool("STRICT_CRC", False)
 # Serve a individuare dove l'inverter *rilegge* un parametro, l'unico modo per
 # sapere se una scrittura ha davvero avuto effetto invece di dedurlo.
 DIAG_FRAMES       = _env_bool("DIAG_FRAMES", False)
+# Diagnostica: all'avvio legge i blocchi di parametri come fa l'app ufficiale e
+# li riporta nel log, per confrontarli con quanto mostra la sua schermata.
+DIAG_PARAMS       = _env_bool("DIAG_PARAMS", False)
 DIAG_STABLE_CYCLES = 3    # cicli di immobilita' prima che un byte faccia notizia
 LOG_LEVEL         = os.environ.get("LOG_LEVEL", "info").strip().lower()
 ADDON_VERSION     = os.environ.get("ADDON_VERSION", "dev")
@@ -107,11 +110,48 @@ T_CMD_SMART_W  = f"{MQTT_PREFIX}/cmd/smart_port_w"
 T_SMART_STATE  = f"{MQTT_PREFIX}/smart_port"
 T_SMART_STATE_A = f"{MQTT_PREFIX}/smart_port_a"
 T_SMART_STATE_W = f"{MQTT_PREFIX}/smart_port_w"
+T_SMART_MODE    = f"{MQTT_PREFIX}/smart_port_mode"
+
+# Batteria: carica completa (on/off) e capacita' riservata (SOC minimo).
+T_CMD_FULL_CHARGE   = f"{MQTT_PREFIX}/cmd/bat_full_charge"
+T_FULL_CHARGE_STATE = f"{MQTT_PREFIX}/bat_full_charge"
+T_CMD_RESERVED      = f"{MQTT_PREFIX}/cmd/bat_reserved_capacity"
+T_RESERVED_STATE    = f"{MQTT_PREFIX}/bat_reserved_capacity"
 
 DEVICE_ID = "tbb_riio_sun_ii"
 
 CMD_C0 = bytes([0x7E, 0xFF, 0x11, 0x03, 0xC0, 0x08, 0xBA, 0xEB])
 CMD_C1 = bytes([0x7E, 0xFF, 0x11, 0x03, 0xC1, 0x08, 0xBB, 0x7B])
+
+# Banchi dei parametri, ricavati dall'app ufficiale TBBLink (plugin KinergierPro,
+# che gestisce anche il RiiO Sun II). Ogni banco ha un comando di lettura e uno
+# di scrittura, in stile Modbus. Le scritture sono frame singoli: l'app non
+# invia alcuna sequenza di sblocco prima di un parametro.
+BANK_A_READ, BANK_A_WRITE = 0x03, 0x06
+BANK_B_READ, BANK_B_WRITE = 0x33, 0x66
+
+REG_SMARTPORT_MODE    = 0x001F    # banco A, indice del menu "Smart Port Modeset"
+REG_SMARTPORT_CURRENT = 0x005E    # banco A, campo "Max Alternator Current"
+REG_BAT_RESERVED      = 0x0072    # banco B, "Battery Reserved Capacity" (%)
+
+# "Battery Full Charge": un comando a se', fuori dai due banchi. L'app scrive
+# 7E FF 11 06 00 0C 03 F3 00 <0|1> e ricava lo stato dall'eco della propria
+# scrittura: non esiste una lettura nota di questo valore.
+CMD_FULL_CHARGE, REG_FULL_CHARGE = 0x00, 0x03F3
+
+PARAM_REFRESH_S = 600     # ogni quanto rileggere i parametri esposti in HA
+SMARTPORT_MODES = {0: "Smart Load", 1: "Smart Gen", 2: "City GEN"}
+
+# Blocchi che l'app legge per popolare la schermata impostazioni:
+# (comando di lettura, primo registro, numero di registri).
+PARAM_BLOCKS = [
+    (BANK_A_READ, 0x0000, 100),
+    (BANK_A_READ, 0x0065, 78),
+    (BANK_A_READ, 0x00CA, 51),
+    (BANK_B_READ, 0x0000, 100),
+    (BANK_B_READ, 0x0064, 100),
+    (BANK_B_READ, 0x00D0, 31),
+]
 
 SERIAL_RETRY_DELAY = 10   # secondi tra due tentativi di riapertura della porta
 MAX_FAILED_CYCLES  = 3    # cicli a vuoto dopo i quali le entita' diventano non disponibili
@@ -240,6 +280,24 @@ def build_frame(cmd: int, register: int, value: int) -> bytes:
         0x0C,
         (register >> 8) & 0xFF, register & 0xFF,
         (value   >> 8) & 0xFF, value   & 0xFF,
+    ])
+    crc = crc16_modbus(frame)
+    return frame + bytes([crc & 0xFF, (crc >> 8) & 0xFF])
+
+
+def build_read_frame(cmd: int, register: int, count: int) -> bytes:
+    """
+    Costruisce un frame di lettura di `count` registri a partire da `register`.
+    cmd = 0x03 (banco A) o 0x33 (banco B). Stesso formato dei modelli usati
+    dall'app ufficiale: 7E FF 11 03 <cmd> 0C <reg> <count> <crc>.
+    """
+    frame = bytes([
+        0x7E, 0xFF, 0x11,
+        0x03,
+        cmd,
+        0x0C,
+        (register >> 8) & 0xFF, register & 0xFF,
+        (count    >> 8) & 0xFF, count    & 0xFF,
     ])
     crc = crc16_modbus(frame)
     return frame + bytes([crc & 0xFF, (crc >> 8) & 0xFF])
@@ -391,7 +449,7 @@ def send_write_sequence(frames: list[bytes], delay: float = 0.2) -> bool:
         if attesa > 0.05:
             log.debug("Attesi %.2fs per la porta seriale (ciclo di lettura in corso)",
                       attesa)
-        muti = 0
+        muti = rifiuti = 0
         for n, frame in enumerate(frames, 1):
             try:
                 ser.reset_input_buffer()
@@ -404,6 +462,14 @@ def send_write_sequence(frames: list[bytes], delay: float = 0.2) -> bool:
                 if resp:
                     log.info("RX %d/%d (%d byte): %s",
                              n, len(frames), len(resp), resp.hex(" ").upper())
+                    # Risposta di eccezione in stile Modbus: 0x80 | tipo, cioe'
+                    # 0x86 per una scrittura. L'app TBBLink la gestisce a parte.
+                    start = resp.find(0x7E)
+                    if start >= 0 and len(resp) > start + 3 and resp[start + 3] & 0x80:
+                        rifiuti += 1
+                        log.warning("L'inverter ha rifiutato il frame %d/%d "
+                                    "(risposta di eccezione %#04x)",
+                                    n, len(frames), resp[start + 3])
                 else:
                     muti += 1
                     log.info("RX %d/%d: nessuna risposta entro %.1fs",
@@ -417,12 +483,76 @@ def send_write_sequence(frames: list[bytes], delay: float = 0.2) -> bool:
         # Non e' necessariamente un errore -- alcuni firmware non rispondono
         # alle scritture -- ma se la scrittura non ha effetto e' il primo
         # indizio che i frame non stanno arrivando all'inverter.
-        log.warning("L'inverter non ha risposto a nessuno dei %d frame: "
+        log.warning("L'inverter non ha risposto %s: "
                     "verifica cablaggio A+/B-, terminazione e baud rate. "
                     "Il ciclo di lettura funziona? Se anche i sensori sono "
                     "fermi, il problema e' la linea, non il comando.",
-                    len(frames))
-    return True
+                    "al frame" if len(frames) == 1 else f"a nessuno dei {len(frames)} frame")
+    return rifiuti == 0
+
+
+def decode_registers(frame: bytes, count: int) -> list[int] | None:
+    """
+    Estrae `count` valori u16 big-endian da una risposta di lettura.
+
+    L'app TBBLink estrae i dati con mid(6, lunghezza - 8): subito dopo
+    l'intestazione di 6 byte, prima del CRC, e li copia in un'immagine dei
+    registri a partire dal registro della *richiesta*. Si accetta anche la
+    forma con l'eco di registro e quantita' (4 byte) in testa, per prudenza.
+    Qualunque altra lunghezza ritorna None invece di produrre valori inventati.
+    """
+    payload = frame[6:-2]
+    if len(payload) == 2 * count:
+        dati = payload
+    elif len(payload) == 2 * count + 4:
+        dati = payload[4:]
+    else:
+        return None
+    return [(dati[2 * i] << 8) | dati[2 * i + 1] for i in range(count)]
+
+
+def read_registers(cmd: int, register: int, count: int) -> list[int] | None:
+    """
+    Legge `count` registri di un banco di parametri. Ritorna None se la porta
+    non e' disponibile, l'inverter non risponde o la risposta non e' decodificabile.
+    La lettura non modifica nulla sull'inverter.
+    """
+    ser = ser_global
+    if ser is None or not ser.is_open:
+        return None
+    tx = build_read_frame(cmd, register, count)
+    try:
+        with ser_lock:
+            ser.reset_input_buffer()
+            ser.write(tx)
+            ser.flush()
+            raw = read_response(ser, first_wait=0.3, max_wait=1.5)
+    except (serial.SerialException, OSError) as e:
+        log.error("Errore nella lettura dei registri %#06x: %s", register, e)
+        return None
+
+    log.debug("TX lettura: %s", tx.hex(" ").upper())
+    if not raw:
+        log.debug("Lettura %#04x/%#06x: nessuna risposta", cmd, register)
+        return None
+    log.debug("RX lettura (%d byte): %s", len(raw), raw.hex(" ").upper())
+
+    start = raw.find(0x7E)
+    frame = raw[start:] if start >= 0 else b""
+    if len(frame) < 8 or frame[4] != cmd:
+        log.info("Lettura %#04x/%#06x: risposta inattesa: %s",
+                 cmd, register, raw.hex(" ").upper())
+        return None
+    length = crc_frame_length(frame)
+    if length is None:
+        log.info("Lettura %#04x/%#06x: CRC non valido: %s",
+                 cmd, register, frame.hex(" ").upper())
+        return None
+    valori = decode_registers(frame[:length], count)
+    if valori is None:
+        log.info("Lettura %#04x/%#06x x%d: formato non riconosciuto (%d byte): %s",
+                 cmd, register, count, length, frame[:length].hex(" ").upper())
+    return valori
 
 
 # ================================================================
@@ -478,13 +608,15 @@ def cmd_smart_port(register: int) -> bool:
     cio' che viene trasmesso: le entita' in ampere e in watt sono viste
     derivate, gia' convertite prima di arrivare qui.
 
-    I frame prodotti qui sono byte per byte quelli della primissima versione
-    funzionante, per ogni valore da 0 a 100 -- c'e' un test che lo verifica
-    contro il sorgente preso da git. Se una scrittura non ha effetto, la causa
-    non e' in questa funzione ma nel numero che le viene passato: e' per questo
-    che il log riporta l'intera catena di conversione.
+    Un solo frame, come fa l'app ufficiale. Fino alla 1.3.3 la scrittura era
+    preceduta da due frame creduti uno "sblocco" (0x66 su 0x0073 e 0x0074, valore
+    10): l'app li tratta invece come normali parametri -- i ritardi di
+    commutazione batteria->rete e rete->batteria -- e quei frame li
+    sovrascrivevano a ogni comando.
 
-    Sequenza: sblocco reg 0x73, sblocco reg 0x74, scrittura reg 0x5E.
+    Dopo la scrittura il registro viene riletto: e' l'unico riscontro che il
+    valore sia stato davvero memorizzato, dato che l'ACK dell'inverter
+    riecheggia qualunque cosa.
     """
     if not isinstance(register, int):
         # build_frame fa >> e & : un float qui solleverebbe TypeError dentro il
@@ -511,21 +643,126 @@ def cmd_smart_port(register: int) -> bool:
                     "(%d-%d): l'inverter accettera' comunque la scrittura, ma "
                     "l'effetto non e' verificato.",
                     register, SMARTPORT_MIN_A, SMARTPORT_MAX_A)
-    frames = [
-        build_frame(0x66, 0x0073, 0x000A),   # sblocco 1
-        build_frame(0x66, 0x0074, 0x000A),   # sblocco 2
-        build_frame(0x06, 0x005E, register), # scrittura SmartPort
-    ]
-    if not send_write_sequence(frames):
+    if not send_write_sequence([build_frame(BANK_A_WRITE, REG_SMARTPORT_CURRENT, register)]):
+        return False
+    letto = verifica_smartport(register)
+    # Se la rilettura riesce, le entita' mostrano cio' che l'inverter ha
+    # davvero memorizzato; altrimenti il valore appena inviato.
+    publish_smartport(register if letto is None else letto)
+    return True
+
+
+def publish_smartport(register: int):
+    """Le tre entita' SmartPort descrivono lo stesso registro: si aggiornano insieme."""
+    if mqtt_client is None:
+        return
+    amps = round(register_to_amps(register))
+    mqtt_client.publish(T_SMART_STATE, register, retain=True)
+    mqtt_client.publish(T_SMART_STATE_A, amps, retain=True)
+    mqtt_client.publish(T_SMART_STATE_W, amps_to_watt(amps), retain=True)
+
+
+def verifica_smartport(atteso: int | None = None) -> int | None:
+    """
+    Rilegge corrente e modalita' della SmartPort e le riporta nel log.
+    Ritorna il valore letto di 0x005E, o None se la rilettura non riesce.
+    """
+    letto = read_registers(BANK_A_READ, REG_SMARTPORT_CURRENT, 1)
+    modo = read_registers(BANK_A_READ, REG_SMARTPORT_MODE, 1)
+    nome_modo = (SMARTPORT_MODES.get(modo[0], f"sconosciuta ({modo[0]})")
+                 if modo else "non letta")
+    if modo and mqtt_client is not None:
+        mqtt_client.publish(T_SMART_MODE, nome_modo, retain=True)
+    if letto is None:
+        log.info("Rilettura di 0x005E non riuscita (modalita' SmartPort: %s). "
+                 "Con log_level debug il log riporta la risposta grezza.", nome_modo)
+        return None
+    if atteso is None or letto[0] == atteso:
+        log.log(25, "Rilettura: 0x005E = %d%s, modalita' SmartPort: %s",
+                letto[0], "  (confermato)" if atteso is not None else "", nome_modo)
+    else:
+        log.warning("Rilettura: 0x005E = %d invece di %d -- l'inverter non ha "
+                    "memorizzato il valore (modalita' SmartPort: %s)",
+                    letto[0], atteso, nome_modo)
+    return letto[0]
+
+
+def cmd_full_charge(attiva: bool) -> bool:
+    """
+    Attiva o disattiva la carica completa della batteria ("Battery Full Charge").
+
+    Lo stato pubblicato e' quello dell'ultimo comando andato a buon fine: e' lo
+    stesso che mostra l'app ufficiale, che non ha modo di rileggerlo.
+    """
+    valore = 1 if attiva else 0
+    log.log(25, "Carica completa batteria -> %s  (comando %#04x, registro %#06x = %d)",
+            "ATTIVA" if attiva else "DISATTIVA", CMD_FULL_CHARGE, REG_FULL_CHARGE, valore)
+    if not send_write_sequence([build_frame(CMD_FULL_CHARGE, REG_FULL_CHARGE, valore)]):
+        return False
+    if mqtt_client is not None:
+        mqtt_client.publish(T_FULL_CHARGE_STATE, "ON" if attiva else "OFF", retain=True)
+    return True
+
+
+def cmd_reserved_capacity(valore: int) -> bool:
+    """
+    Imposta la capacita' riservata della batteria (SOC minimo, %) e la rilegge.
+
+    L'inverter riecheggia qualunque valore: il controllo 0-100 e' l'unica
+    difesa contro una percentuale impossibile.
+    """
+    if not isinstance(valore, int) or not 0 <= valore <= 100:
+        log.warning("Capacita' riservata non valida: %r (ammessi 0-100 %%)", valore)
+        return False
+    log.log(25, "Capacita' riservata batteria -> %d %%  (banco B, registro %#06x)",
+            valore, REG_BAT_RESERVED)
+    if not send_write_sequence([build_frame(BANK_B_WRITE, REG_BAT_RESERVED, valore)]):
         return False
 
-    # Le tre entita' descrivono lo stesso registro: dopo una scrittura vanno
-    # aggiornate tutte, da qualunque delle tre sia arrivato il comando.
+    letto = read_registers(BANK_B_READ, REG_BAT_RESERVED, 1)
+    if letto is None:
+        log.info("Rilettura della capacita' riservata non riuscita: pubblico il "
+                 "valore inviato")
+        stato = valore
+    elif letto[0] != valore:
+        log.warning("Rilettura: capacita' riservata = %d %% invece di %d %% -- "
+                    "l'inverter non ha memorizzato il valore", letto[0], valore)
+        stato = letto[0]
+    else:
+        log.log(25, "Rilettura: capacita' riservata = %d %%  (confermato)", letto[0])
+        stato = letto[0]
     if mqtt_client is not None:
-        mqtt_client.publish(T_SMART_STATE, register, retain=True)
-        mqtt_client.publish(T_SMART_STATE_A, amps, retain=True)
-        mqtt_client.publish(T_SMART_STATE_W, amps_to_watt(amps), retain=True)
+        mqtt_client.publish(T_RESERVED_STATE, stato, retain=True)
     return True
+
+
+def refresh_parameters() -> int:
+    """
+    Rilegge i parametri esposti come entita' e ne pubblica lo stato, cosi' Home
+    Assistant mostra i valori dell'inverter -- anche quelli cambiati dall'app o
+    dal pannello -- e non solo l'ultimo comando inviato da qui.
+    Ritorna il numero di letture riuscite.
+    """
+    riuscite = 0
+    corrente = read_registers(BANK_A_READ, REG_SMARTPORT_CURRENT, 1)
+    if corrente:
+        riuscite += 1
+        publish_smartport(corrente[0])
+    modo = read_registers(BANK_A_READ, REG_SMARTPORT_MODE, 1)
+    if modo:
+        riuscite += 1
+        if mqtt_client is not None:
+            mqtt_client.publish(T_SMART_MODE,
+                                SMARTPORT_MODES.get(modo[0], f"sconosciuta ({modo[0]})"),
+                                retain=True)
+    riserva = read_registers(BANK_B_READ, REG_BAT_RESERVED, 1)
+    if riserva:
+        riuscite += 1
+        if mqtt_client is not None:
+            mqtt_client.publish(T_RESERVED_STATE, riserva[0], retain=True)
+    log.debug("Parametri riletti: SmartPort %s, modalita' %s, capacita' riservata %s",
+              corrente, modo, riserva)
+    return riuscite
 
 
 def cmd_raw(hex_string: str) -> bool:
@@ -576,23 +813,40 @@ def s16be(data: bytes, offset: int) -> int:
 
 
 def decode_c0(frame: bytes) -> dict:
-    """AC in/out, batteria, SOC, temperature, carico."""
+    """
+    AC in, generatore, uscite AC, batteria, SOC, temperature, carico.
+
+    Gli offset di rete, generatore e uscite sono quelli che il pannello di
+    monitoraggio dell'app TBBLink usa per il RiiO Sun II: per ogni grandezza la
+    stessa coppia di byte, la stessa scala e lo stesso segno. Fino alla 1.3.3
+    alcuni erano scambiati: il byte 22 -- pubblicato come tensione di rete --
+    e' la tensione del generatore, e il byte 40 -- pubblicato come frequenza di
+    uscita -- e' la frequenza della rete.
+    """
     d = {}
     n = len(frame)
     try:
+        if n > 11:
+            d["ac_in_w"]       = s16be(frame, 8)
+            d["gen_w"]         = s16be(frame, 10)
         if n > 15:
-            d["ac_out_w"]      = u16be(frame, 14)
+            d["ac_out_w"]      = s16be(frame, 14)
         if n > 17:
-            d["ac_out2_v"]     = u16be(frame, 16) / 10.0
-        if n > 25:
-            d["ac_in_v"]       = u16be(frame, 22) / 10.0
-            d["ac_out_v"]      = u16be(frame, 24) / 10.0
+            d["ac_out2_w"]     = s16be(frame, 16)
+        if n > 29:
+            d["ac_in_v"]       = u16be(frame, 20) / 10.0
+            d["gen_v"]         = u16be(frame, 22) / 10.0
+            d["ac_out_v"]      = u16be(frame, 26) / 10.0
+            d["ac_out2_v"]     = u16be(frame, 28) / 10.0
         if n > 39:
             d["ac_in_i"]       = s16be(frame, 30) / 100.0
-            d["ac_out_i"]      = u16be(frame, 36) / 100.0
-            d["ac_out2_i"]     = u16be(frame, 38) / 100.0
-        if n > 41:
-            d["ac_freq"]       = u16be(frame, 40) / 100.0
+            d["gen_i"]         = s16be(frame, 32) / 100.0
+            d["ac_out_i"]      = s16be(frame, 36) / 100.0
+            d["ac_out2_i"]     = s16be(frame, 38) / 100.0
+        if n > 45:
+            d["ac_in_freq"]    = u16be(frame, 40) / 100.0
+            d["gen_freq"]      = u16be(frame, 42) / 100.0
+            d["ac_freq"]       = u16be(frame, 44) / 100.0
         if n > 53:
             d["bat_v"]         = u16be(frame, 50) / 1000.0
             d["bat_i"]         = s16be(frame, 52) / 10.0
@@ -705,6 +959,118 @@ def diag_frame(nome: str, frame: bytes | None):
 
 
 # ================================================================
+# Parametri di configurazione
+# ================================================================
+
+# (comando di lettura, registro) -> (campo dell'app TBBLink, significato, unita').
+#
+# Ricavata dal plugin KinergierPro dell'app ufficiale: per ogni frame di
+# scrittura, il widget da cui l'app prende il valore. I comandi di scrittura
+# corrispondenti sono 0x06 per il banco A e 0x66 per il banco B. Le unita'
+# indicate "mV" sono quelle in cui l'app converte il campo prima di inviarlo;
+# le altre sono il numero cosi' come appare nell'interfaccia, ancora da
+# confermare sul campo con diag_params.
+_A, _B = BANK_A_READ, BANK_B_READ
+PARAM_NAMES = {
+    (_A, 0x0010): ("comboBox_ACIL",              "Logica ingresso AC (indice)",          ""),
+    (_A, 0x0016): ("comboBox_ACOC",              "Controllo uscita AC2 (indice)",        ""),
+    (_A, 0x001F): ("Cbo_ACFlexMode",             "Modalita' SmartPort (0 Smart Load, 1 Smart Gen, 2 City GEN)", ""),
+    (_A, 0x003C): ("comboBox_BackflowEnable",    "Anti-immissione abilitata (indice)",   ""),
+    (_A, 0x005D): ("Cbo_AcInByPassConnect",      "Bypass ingresso AC (indice)",          ""),
+    (_A, 0x005E): ("Edt_MaxAlternatorCurrent",   "Corrente massima generatore",          "A"),
+    (_A, 0x00C1): ("comboBox_Relay1Func",        "Funzione rele' 1",                     ""),
+    (_A, 0x00C2): ("comboBox_Relay2Func",        "Funzione rele' 2",                     ""),
+
+    (_B, 0x0007): ("Cbo_IRD_DeviceEn",           "Dispositivo IRD abilitato (indice)",   ""),
+    (_B, 0x0012): ("Cbo_GenLoadCtrl",            "Generatore: controllo carico (indice)", ""),
+    (_B, 0x0013): ("Edt_GenChargeStartDelay",    "Generatore: ritardo avvio carica",     ""),
+    (_B, 0x0014): ("Edt_GenChargeStopDelay",     "Generatore: ritardo arresto carica",   ""),
+    (_B, 0x0015): ("lineEdit_Gen_StartBatVolt",  "Generatore: avvio sotto tensione batteria", "mV"),
+    (_B, 0x0016): ("lineEdit_Gen_StopBatVolt",   "Generatore: arresto sopra tensione batteria", "mV"),
+    (_B, 0x001A): ("lineEdit_Gen_StartLoad",     "Generatore: avvio sopra carico",       ""),
+    (_B, 0x001B): ("lineEdit_Gen_StopLoad",      "Generatore: arresto sotto carico",     ""),
+    (_B, 0x001C): ("lineEdit_Gen_StartSOC",      "Generatore: avvio sotto SOC",          "%"),
+    (_B, 0x001D): ("lineEdit_Gen_StopSOC",       "Generatore: arresto sopra SOC",        "%"),
+    (_B, 0x001E): ("Edt_GenLoadStartDelay",      "Generatore: ritardo avvio per carico", ""),
+    (_B, 0x001F): ("Edt_GenLoadStopDelay",       "Generatore: ritardo arresto per carico", ""),
+    (_B, 0x0028): ("radioButton_AutoCharge",     "Carica automatica",                    ""),
+    (_B, 0x002A): ("lineEdit_ACI_ConnectBAT",    "Ingresso AC: connetti sotto tensione batteria", "mV"),
+    (_B, 0x002B): ("lineEdit_ACI_DisconnectBAT", "Ingresso AC: disconnetti sopra tensione batteria", "mV"),
+    (_B, 0x002C): ("lineEdit_ACI_ConnectDelay",  "Ingresso AC: ritardo connessione",     ""),
+    (_B, 0x002D): ("lineEdit_ACI_DisconnectDelay", "Ingresso AC: ritardo disconnessione", ""),
+    (_B, 0x002E): ("lineEdit_ACI_ConnectSOC",    "Ingresso AC: connetti sotto SOC",      "%"),
+    (_B, 0x002F): ("lineEdit_ACI_DisconnectSOC", "Ingresso AC: disconnetti sopra SOC",   "%"),
+    (_B, 0x0031): ("lineEdit_Gen_MinRuntime",    "Generatore: tempo minimo di marcia",   ""),
+    (_B, 0x0032): ("lineEdit_Gen_StartIntervaltime", "Generatore: intervallo fra avvii", ""),
+    (_B, 0x003E): ("Cbo_StopGenWhenGridIsVailid", "Ferma il generatore con rete presente (indice)", ""),
+    (_B, 0x0040): ("comboBox_ACOC",              "Controllo uscita AC2 (indice)",        ""),
+    (_B, 0x0041): ("lineEdit_ACO_DisconnectBAT", "Uscita AC2: stacca sotto tensione batteria", "mV"),
+    (_B, 0x0042): ("lineEdit_ACO_ConnectBAT",    "Uscita AC2: attacca sopra tensione batteria", "mV"),
+    (_B, 0x004C): ("lineEdit_ACO_DisconnectSOC", "Uscita AC2: stacca sotto SOC",         "%"),
+    (_B, 0x004D): ("lineEdit_ACO_ConnectSOC",    "Uscita AC2: attacca sopra SOC",        "%"),
+    (_B, 0x0051): ("lineEdit_ACI_ChargeDerate",  "Ingresso AC: riduzione carica",        ""),
+    (_B, 0x0054): ("lineEdit_ACIChgMaxCurAtBatLv", "Ingresso AC: corrente max di carica a batteria bassa", ""),
+    (_B, 0x0055): ("lineEdit_ACIStopCHGVolt",    "Ingresso AC: ferma la carica sopra tensione", "mV"),
+    (_B, 0x0056): ("lineEdit_ACIStopChargeSOC",  "Ingresso AC: ferma la carica sopra SOC", "%"),
+    (_B, 0x005A): ("Cbo_AcInByPassConnect",      "Bypass ingresso AC (indice)",          ""),
+    (_B, 0x005C): ("Edt_MaxGeneratorChargeCurrent", "Corrente massima di carica da generatore / AC in 2", ""),
+    (_B, 0x0060): ("comboBox_acinLvWarn",        "Avviso sottotensione ingresso AC",     ""),
+    (_B, 0x0061): ("comboBox_mpptofflinewarn",   "Avviso MPPT offline",                  ""),
+    (_B, 0x0062): ("comboBox_SmartGenLVWarn",    "Avviso sottotensione Smart Gen",       ""),
+    (_B, 0x0063): ("lineEdit_ACO_PV_ConnectPower", "Smart Load: attacca sopra potenza FV", ""),
+    (_B, 0x0064): ("lineEdit_ACO_PV_DisconnectPower", "Smart Load: stacca sotto potenza FV", ""),
+    (_B, 0x0065): ("lineEdit_ACO_PV_ConnectSOC", "Smart Load: attacca sopra SOC",        "%"),
+    (_B, 0x0066): ("lineEdit_ACO_PV_DisconnectSOC", "Smart Load: stacca sotto SOC",      "%"),
+    (_B, 0x0067): ("lineEdit_ACO_PV_ConnectBatVolt", "Smart Load: attacca sopra tensione batteria", ""),
+    (_B, 0x0068): ("lineEdit_ACO_PV_DisconnectBatVolt", "Smart Load: stacca sotto tensione batteria", ""),
+    (_B, 0x0069): ("lineEdit_ACO_PV_ConnectDelay", "Smart Load: ritardo aggancio",       ""),
+    (_B, 0x006A): ("lineEdit_ACO_PV_DisconnectDelay", "Smart Load: ritardo sgancio",     ""),
+    (_B, 0x006B): ("lineEdit_ACO_Load_ConnectPrecent", "Smart Load: attacca sopra carico", "%"),
+    (_B, 0x006C): ("lineEdit_ACO_Load_DisconnectPrecent", "Smart Load: stacca sotto carico", "%"),
+    (_B, 0x006D): ("lineEdit_ACO_Load_ConnectDelay", "Smart Load: ritardo aggancio per carico", ""),
+    (_B, 0x006E): ("lineEdit_ACO_Load_DisconnectDelay", "Smart Load: ritardo sgancio per carico", ""),
+    (_B, 0x0070): ("Edt_BatVoltBackToUtilityMode", "Torna alla rete sotto tensione batteria", "mV"),
+    (_B, 0x0071): ("Edt_BatVoltBackToBatMode",   "Torna alla batteria sopra tensione",   "mV"),
+    (_B, 0x0072): ("Edt_BatReservedCapacity",    "Capacita' riservata della batteria",   "%"),
+    (_B, 0x0073): ("Edt_BatToUtilityDelay",      "Ritardo commutazione batteria -> rete", ""),
+    (_B, 0x0074): ("Edt_UtilityToBatDelay",      "Ritardo commutazione rete -> batteria", ""),
+    (_B, 0x00DD): ("Cbo_ExternalAcInMeter",      "Contatore esterno su ingresso AC (indice)", ""),
+    (_B, 0x00ED): ("comboBox_FeedBackEnable",    "Immissione in rete abilitata (indice)", ""),
+    (_B, 0x00EE): ("Edt_FeedBackPower",          "Potenza di immissione",                ""),
+}
+del _A, _B
+
+
+def dump_parameters() -> int:
+    """
+    Legge i blocchi di parametri come l'app ufficiale e li riporta nel log:
+    prima i valori grezzi, dieci per riga, poi quelli di cui conosciamo il nome.
+    Serve a confrontare la mappa con cio' che l'app mostra a schermo.
+    Ritorna il numero di blocchi letti con successo.
+    """
+    letti = 0
+    for cmd, primo, quanti in PARAM_BLOCKS:
+        valori = read_registers(cmd, primo, quanti)
+        banco = "A" if cmd == BANK_A_READ else "B"
+        if valori is None:
+            log.info("PARAM banco %s %#06x x%d: lettura non riuscita", banco, primo, quanti)
+            continue
+        letti += 1
+        for base in range(0, quanti, 10):
+            riga = " ".join(f"{v:5d}" for v in valori[base:base + 10])
+            log.info("PARAM banco %s %#06x | %s", banco, primo + base, riga)
+        for i, v in enumerate(valori):
+            voce = PARAM_NAMES.get((cmd, primo + i))
+            if voce:
+                campo, significato, unita = voce
+                extra = f"  ({v / 1000:.2f} V)" if unita == "mV" else (f" {unita}" if unita else "")
+                log.log(25, "PARAM %s %#06x = %5d%s  %s  [%s]",
+                        banco, primo + i, v, extra, significato, campo)
+        time.sleep(0.1)
+    return letti
+
+
+# ================================================================
 # Canali calcolati
 # ================================================================
 
@@ -716,21 +1082,14 @@ def _bat_status(d: dict) -> str:
 # (chiave, dipendenze, calcolo)
 #
 # Le voci vengono valutate in ordine e scrivono nello stesso dizionario, quindi
-# un canale calcolato puo' dipendere da uno definito piu' in alto (e' il caso di
-# ac_out_tot_w, che usa ac_out2_w).
+# un canale calcolato puo' dipendere da uno definito piu' in alto.
 #
-# Nota sui segni: bat_i e ac_in_i sono con segno, quindi lo sono anche le
-# potenze derivate. bat_w positiva = batteria in carica; ac_in_w negativa =
-# energia prelevata dalla rete.
+# Le potenze di rete, generatore e uscita 2 non sono piu' calcolate: l'inverter
+# le misura e le riporta nel frame C0, con il proprio segno. Resta calcolata la
+# potenza di batteria: bat_i e' con segno, quindi bat_w positiva = in carica.
 DERIVED = [
     ("bat_w",        ("bat_v", "bat_i"),
      lambda d: round(d["bat_v"] * d["bat_i"], 1)),
-
-    ("ac_in_w",      ("ac_in_v", "ac_in_i"),
-     lambda d: round(d["ac_in_v"] * d["ac_in_i"])),
-
-    ("ac_out2_w",    ("ac_out2_v", "ac_out2_i"),
-     lambda d: round(d["ac_out2_v"] * d["ac_out2_i"])),
 
     ("ac_out_tot_w", ("ac_out_w", "ac_out2_w"),
      lambda d: round(d["ac_out_w"] + d["ac_out2_w"])),
@@ -791,11 +1150,19 @@ SENSORS = [
     ("ac_out2_w",     "Potenza uscita AC 2",      "W",   "power",       "measurement", None,             0, False),
     ("ac_out_tot_w",  "Potenza uscita AC totale", "W",   "power",       "measurement", None,             0, False),
     ("ac_freq",       "Frequenza uscita",         "Hz",  "frequency",   "measurement", None,             2, True),
+    ("ac_in_freq",    "Frequenza rete",           "Hz",  "frequency",   "measurement", None,             2, True),
     ("load_pct",      "Carico",                   "%",   None,          "measurement", "mdi:gauge",      0, False),
 
     ("ac_in_v",       "Tensione rete",            "V",   "voltage",     "measurement", None,             1, False),
     ("ac_in_i",       "Corrente rete",            "A",   "current",     "measurement", None,             2, False),
     ("ac_in_w",       "Potenza rete",             "W",   "power",       "measurement", None,             0, False),
+
+    # Ingresso generatore: e' da qui che entra l'energia quando la SmartPort
+    # lavora come Smart Gen. Ricavato dal pannello GEN dell'app TBBLink.
+    ("gen_v",         "Tensione generatore",      "V",   "voltage",     "measurement", None,             1, False),
+    ("gen_i",         "Corrente generatore",      "A",   "current",     "measurement", None,             2, False),
+    ("gen_w",         "Potenza generatore",       "W",   "power",       "measurement", None,             0, False),
+    ("gen_freq",      "Frequenza generatore",     "Hz",  "frequency",   "measurement", None,             2, True),
 
     ("t_heatsink",    "Temperatura dissipatore",  "°C",  "temperature", "measurement", None,             0, True),
     ("t_transformer", "Temperatura trasformatore", "°C", "temperature", "measurement", None,             0, True),
@@ -892,6 +1259,54 @@ def discovery_payloads() -> list[tuple[str, dict]]:
                 "origin": _origin_block(),
             },
         ))
+
+    comune = {
+        "availability_topic": T_AVAILABILITY,
+        "device": _device_block(),
+        "origin": _origin_block(),
+    }
+    items.append((
+        f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/smart_port_mode/config",
+        {
+            "name": "SmartPort modalita'",
+            "unique_id": f"{DEVICE_ID}_smart_port_mode",
+            "object_id": f"{DEVICE_ID}_smart_port_mode",
+            "state_topic": T_SMART_MODE,
+            "icon": "mdi:swap-horizontal",
+            **comune,
+        },
+    ))
+    items.append((
+        f"{DISCOVERY_PREFIX}/switch/{DEVICE_ID}/bat_full_charge/config",
+        {
+            "name": "Carica completa batteria",
+            "unique_id": f"{DEVICE_ID}_bat_full_charge",
+            "object_id": f"{DEVICE_ID}_bat_full_charge",
+            "command_topic": T_CMD_FULL_CHARGE,
+            "state_topic": T_FULL_CHARGE_STATE,
+            "payload_on": "ON", "payload_off": "OFF",
+            "state_on": "ON", "state_off": "OFF",
+            "icon": "mdi:battery-charging-100",
+            "entity_category": "config",
+            **comune,
+        },
+    ))
+    items.append((
+        f"{DISCOVERY_PREFIX}/number/{DEVICE_ID}/bat_reserved_capacity/config",
+        {
+            "name": "Capacita' riservata batteria",
+            "unique_id": f"{DEVICE_ID}_bat_reserved_capacity",
+            "object_id": f"{DEVICE_ID}_bat_reserved_capacity",
+            "command_topic": T_CMD_RESERVED,
+            "state_topic": T_RESERVED_STATE,
+            "unit_of_measurement": "%",
+            "min": 0, "max": 100, "step": 1,
+            "mode": "box",
+            "icon": "mdi:battery-lock",
+            "entity_category": "config",
+            **comune,
+        },
+    ))
     return items
 
 
@@ -983,7 +1398,8 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
     # Le sottoscrizioni vanno rifatte ad ogni connessione: dopo un riavvio del
     # broker una subscribe fatta una volta sola all'avvio andrebbe persa.
-    topics = [(t, 0) for t in SMARTPORT_COMMANDS] + [(T_CMD_RAW, 0)]
+    topics = ([(t, 0) for t in SMARTPORT_COMMANDS]
+              + [(T_CMD_FULL_CHARGE, 0), (T_CMD_RESERVED, 0), (T_CMD_RAW, 0)])
     client.subscribe(topics)
     log.debug("Sottoscritto a: %s", ", ".join(t for t, _ in topics))
 
@@ -1032,6 +1448,31 @@ def on_message(client, userdata, msg):
                      valore, unita, registro,
                      "  (identita')" if float(registro) == float(valore) else "")
             ok = cmd_smart_port(registro)
+            client.publish(f"{msg.topic}/status", "OK" if ok else "ERRORE")
+
+        elif msg.topic == T_CMD_FULL_CHARGE:
+            scelta = payload.strip().upper()
+            if scelta in ("ON", "1", "TRUE"):
+                ok = cmd_full_charge(True)
+            elif scelta in ("OFF", "0", "FALSE"):
+                ok = cmd_full_charge(False)
+            else:
+                log.warning("Comando carica completa non riconosciuto: %r (usa ON/OFF)",
+                            payload)
+                ok = False
+            client.publish(f"{msg.topic}/status", "OK" if ok else "ERRORE")
+
+        elif msg.topic == T_CMD_RESERVED:
+            try:
+                valore = float(payload)
+                if valore != valore or valore != round(valore):   # NaN o decimali
+                    raise ValueError(payload)
+                valore = int(valore)
+            except (ValueError, OverflowError):
+                log.warning("Capacita' riservata non numerica o non intera: %r", payload)
+                client.publish(f"{msg.topic}/status", "ERRORE")
+                return
+            ok = cmd_reserved_capacity(valore)
             client.publish(f"{msg.topic}/status", "OK" if ok else "ERRORE")
 
         elif msg.topic == T_CMD_RAW:
@@ -1097,13 +1538,17 @@ def log_data(data: dict, cycle: int):
          f"{_fmt(g('ac_out_w'), '5.0f')} W"),
         (f"  AC Out2:   {_fmt(g('ac_out2_v'), '6.1f')} V  {_fmt(g('ac_out2_i'), '5.2f')} A  "
          f"{_fmt(g('ac_out2_w'), '5.0f')} W"),
-        f"  AC In:     {_fmt(g('ac_in_v'), '6.1f')} V  {_fmt(ac_in_i, '+6.2f')} A  ({ac_dir})",
-        f"  Freq:      {_fmt(g('ac_freq'), '6.2f')} Hz",
+        (f"  Rete:      {_fmt(g('ac_in_v'), '6.1f')} V  {_fmt(ac_in_i, '+6.2f')} A  "
+         f"{_fmt(g('ac_in_w'), '+5.0f')} W  {_fmt(g('ac_in_freq'), '5.2f')} Hz  ({ac_dir})"),
+        (f"  Generatore:{_fmt(g('gen_v'), '6.1f')} V  {_fmt(g('gen_i'), '+6.2f')} A  "
+         f"{_fmt(g('gen_w'), '+5.0f')} W  {_fmt(g('gen_freq'), '5.2f')} Hz"),
+        f"  Freq out:  {_fmt(g('ac_freq'), '6.2f')} Hz",
         (f"  Batteria:  {_fmt(g('bat_v'), '6.3f')} V  {_fmt(g('bat_i'), '+6.1f')} A "
          f"({g('bat_status', '--')})  SOC {_fmt(g('soc'), '3')}%"),
         f"  BAT BMS:   {_fmt(g('bat_v_bms'), '.3f')} V",
         (f"  Potenze:   Batteria {_fmt(g('bat_w'), '+7.0f')} W   "
          f"Rete {_fmt(g('ac_in_w'), '+6.0f')} W   "
+         f"Gen {_fmt(g('gen_w'), '+6.0f')} W   "
          f"Uscite {_fmt(g('ac_out_tot_w'), '5.0f')} W"),
         (f"  Temp:      Heatsink {_fmt(g('t_heatsink'), '3')}°C  "
          f"Transformer {_fmt(g('t_transformer'), '3')}°C  "
@@ -1179,6 +1624,9 @@ def banner():
              SMARTPORT_VOLTAGE)
     log.info("  Comandi:   %s/cmd/smart_port[_a|_w]  |  raw %s",
              MQTT_PREFIX, "abilitato" if ALLOW_RAW_COMMAND else "disabilitato")
+    if DIAG_PARAMS:
+        log.info("  DIAGNOSTICA PARAMETRI ATTIVA: al primo ciclo riuscito verranno "
+                 "letti e riportati i parametri di configurazione.")
     if DIAG_FRAMES:
         log.info("  DIAGNOSTICA FRAME ATTIVA: verranno segnalati i byte che "
                  "cambiano dopo essere stati fermi almeno %d cicli.",
@@ -1219,6 +1667,8 @@ def main():
 
     cycle = 0
     failed = 0
+    parametri_letti = not DIAG_PARAMS
+    ultima_rilettura = None
     try:
         while True:
             # --- Porta seriale: apertura e riapertura automatica -------------
@@ -1256,6 +1706,17 @@ def main():
                     set_available(mqtt_client, False)
                 time.sleep(POLL_INTERVAL)
                 continue
+
+            if data and not parametri_letti:
+                # Una sola volta, a linea verificata: i blocchi sono ~460
+                # registri e non servono a ogni ciclo.
+                log.info("DIAG PARAM: lettura dei parametri di configurazione")
+                parametri_letti = dump_parameters() > 0
+
+            if data and (ultima_rilettura is None
+                         or time.monotonic() - ultima_rilettura >= PARAM_REFRESH_S):
+                refresh_parameters()
+                ultima_rilettura = time.monotonic()
 
             if data:
                 failed = 0

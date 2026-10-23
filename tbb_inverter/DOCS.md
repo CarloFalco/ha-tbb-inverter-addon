@@ -80,6 +80,8 @@ flusso.
 | `discovery_prefix` | `homeassistant` | Cambialo solo se hai personalizzato il prefisso di discovery dell'integrazione MQTT. |
 | `allow_raw_command` | `false` | Abilita il topic `cmd/raw`. Vedi [l'avviso](#frame-raw). |
 | `strict_crc` | `false` | Scarta le risposte con CRC non valido invece di provare comunque a decodificarle. |
+| `diag_frames` | `false` | Segnala nel log i byte dei frame di lettura che cambiano dopo essere rimasti fermi. Solo diagnostica. |
+| `diag_params` | `false` | Al primo ciclo legge i parametri di configurazione come l'app ufficiale e li riporta nel log. Non modifica nulla. Solo diagnostica. |
 | `smartport_register_unit` | `ampere` | Cosa contiene il registro `0x005E`: `ampere` (il numero **sono** gli ampere) o `percent`. Vedi la verifica nei [comandi](#-comandi-di-scrittura). |
 | `smartport_a_at_zero` | `0` | Solo con `percent`: corrente corrispondente al registro a 0. |
 | `smartport_min_a` | `5` | Estremo inferiore dello slider in ampere. Sul RiiO Sun II il minimo è 5 A e l'inverter non scende sotto. |
@@ -159,15 +161,20 @@ le entità già configurate:
 | Temperatura batteria | °C | `sensor.tbb_riio_sun_ii_t_bat` |
 | Tensione / Corrente / Potenza uscita AC | V / A / W | `sensor.tbb_riio_sun_ii_ac_out_v` … |
 | Tensione / Corrente / Potenza uscita AC 2 | V / A / W | `sensor.tbb_riio_sun_ii_ac_out2_v` … |
+| **Tensione / Corrente / Potenza generatore** | V / A / W | `sensor.tbb_riio_sun_ii_gen_v` … |
+| Frequenza generatore 🔧 | Hz | `sensor.tbb_riio_sun_ii_gen_freq` |
+| Frequenza rete 🔧 | Hz | `sensor.tbb_riio_sun_ii_ac_in_freq` |
 | **Potenza uscita AC totale** ⚙ | W | `sensor.tbb_riio_sun_ii_ac_out_tot_w` |
 | Frequenza uscita 🔧 | Hz | `sensor.tbb_riio_sun_ii_ac_freq` |
 | Carico | % | `sensor.tbb_riio_sun_ii_load_pct` |
-| Tensione / Corrente rete | V / A | `sensor.tbb_riio_sun_ii_ac_in_v` … |
-| **Potenza rete** ⚙ | W | `sensor.tbb_riio_sun_ii_ac_in_w` |
+| Tensione / Corrente / Potenza rete | V / A / W | `sensor.tbb_riio_sun_ii_ac_in_v` … |
 | Temperature dissipatore / trasformatore / inverter 🔧 | °C | `sensor.tbb_riio_sun_ii_t_heatsink` … |
 | **SmartPort registro** *(scrivibile)* | — | `number.tbb_riio_sun_ii_smart_port` |
 | **SmartPort corrente** *(scrivibile)* | A | `number.tbb_riio_sun_ii_smart_port_a` |
 | **SmartPort potenza** *(scrivibile)* | W | `number.tbb_riio_sun_ii_smart_port_w` |
+| SmartPort modalità | — | `sensor.tbb_riio_sun_ii_smart_port_mode` |
+| **Carica completa batteria** *(interruttore)* | — | `switch.tbb_riio_sun_ii_bat_full_charge` |
+| **Capacità riservata batteria** *(scrivibile)* | % | `number.tbb_riio_sun_ii_bat_reserved_capacity` |
 
 Le voci con ⚙ sono [canali calcolati](#-canali-calcolati). `bat_status` vale
 *In carica*, *In scarica* o *A riposo*, ricavato dal segno della corrente di
@@ -241,8 +248,6 @@ lette, ad ogni ciclo:
 | Entità | Calcolo | Come leggere il segno |
 |---|---|---|
 | `bat_w` — Potenza batteria | `bat_v` × `bat_i` | **positiva** = batteria in carica, **negativa** = in scarica |
-| `ac_in_w` — Potenza rete | `ac_in_v` × `ac_in_i` | **negativa** = stai prelevando dalla rete, **positiva** = stai immettendo |
-| `ac_out2_w` — Potenza uscita AC 2 | `ac_out2_v` × `ac_out2_i` | — |
 | `ac_out_tot_w` — Potenza uscita AC totale | `ac_out_w` + `ac_out2_w` | — |
 | `bat_status` — Stato batteria | segno di `bat_i` | *In carica* / *In scarica* / *A riposo* |
 
@@ -250,12 +255,11 @@ Un canale calcolato compare **solo se tutti i suoi ingressi sono presenti** nel
 ciclo. Se una risposta arriva corta e manca la corrente di batteria, `bat_w` non
 viene aggiornato invece di crollare a zero.
 
-> ⚠️ **Precisione sui canali AC.** Sulla batteria, che è in continua, tensione ×
-> corrente dà la potenza reale in watt, esatta. Sui canali in alternata
-> (`ac_in_w`, `ac_out2_w`) lo stesso prodotto dà la **potenza apparente** (VA):
-> coincide con i watt solo se il fattore di potenza è vicino a 1. Con carichi
-> fortemente induttivi aspettati una sovrastima. `ac_out_w` invece è misurato
-> direttamente dall'inverter, quindi è potenza reale.
+> **Le potenze in alternata non sono calcolate.** Rete (`ac_in_w`), generatore
+> (`gen_w`), uscita 1 (`ac_out_w`) e uscita 2 (`ac_out2_w`) sono misurate
+> dall'inverter e lette così come le riporta, con il loro segno. Fino alla 1.3.3
+> `ac_in_w` e `ac_out2_w` erano il prodotto V × A, cioè potenza apparente — e
+> su due grandezze lette dai byte sbagliati.
 
 ### Aggiungerne altri
 
@@ -360,8 +364,32 @@ data:
 ```
 
 L'add-on converte nel valore di registro, verifica che sia nell'intervallo,
-invia la sequenza di sblocco richiesta dall'inverter e scrive `0x005E`. Un
-valore fuori scala viene rifiutato senza trasmettere un solo byte.
+scrive `0x005E` con un frame singolo — come fa l'app ufficiale — e poi lo
+**rilegge** insieme alla modalità della SmartPort. Un valore fuori scala viene
+rifiutato senza trasmettere un solo byte.
+
+> ⚠️ **Se hai usato una versione fino alla 1.3.3, controlla due parametri
+> nell'app TBBLink.** Quelle versioni precedevano ogni scrittura con due frame
+> creduti uno «sblocco», che in realtà impostavano a **10** il *ritardo di
+> commutazione batteria → rete* e il *ritardo rete → batteria* (registri
+> `0x0073` e `0x0074`). Se i tuoi valori erano diversi, vanno ripristinati
+> dall'app. Dalla 1.3.4 l'add-on non li tocca più. Dettagli in
+> [`PROTOCOLLO.md`](https://github.com/CarloFalco/ha-tbb-inverter-addon/blob/main/PROTOCOLLO.md).
+
+#### Modalità della SmartPort
+
+Il registro `0x005E` corrisponde, nell'app ufficiale, al campo *corrente
+massima del generatore*. La SmartPort ha una modalità (registro `0x001F`):
+
+| Valore | Modalità |
+|:---:|---|
+| 0 | Smart Load — la porta alimenta un carico |
+| 1 | Smart Gen — alla porta è collegato un generatore |
+| 2 | City GEN |
+
+Dopo ogni scrittura il log riporta la modalità letta dall'inverter. Se è
+*Smart Load*, è plausibile che la corrente impostata non abbia alcun effetto:
+si tratta del limite di un generatore che non c'è.
 
 #### Se il tuo firmware interpreta il registro come percentuale
 
@@ -421,18 +449,36 @@ verificare se le scritture dell'add-on attecchiscono davvero.
 
 Ricordati di rimettere `diag_frames: false` quando hai finito.
 
+#### Leggere i parametri come fa l'app
+
+Con `diag_params: true`, al primo ciclo riuscito l'add-on legge i blocchi di
+parametri che l'app TBBLink legge per popolare la sua schermata impostazioni, e
+li riporta nel log: prima tutti i valori grezzi, poi quelli di cui conosciamo
+il nome.
+
+```
+[NOTICE] PARAM A 0x001f =     0  Modalita' SmartPort (0 Smart Load, 1 Smart Gen, 2 City GEN)  [Cbo_ACFlexMode]
+[NOTICE] PARAM A 0x005e =    16 A  Corrente massima generatore  [Edt_MaxAlternatorCurrent]
+[NOTICE] PARAM B 0x0073 =    10  Ritardo commutazione batteria -> rete  [Edt_BatToUtilityDelay]
+```
+
+La lettura non modifica nulla. Il formato della risposta non è ancora stato
+verificato su un inverter reale: se il log dice «formato non riconosciuto»,
+copia quella riga, è esattamente l'informazione che serve per completarlo.
+Confronta i valori con la schermata dell'app e poi rimetti `diag_params: false`.
+
 #### Quando una scrittura non ha effetto
 
-Il log riporta l'intera catena, dal comando MQTT ai byte sulla linea. Con
-`log_level: info` una scrittura produce:
+Il log riporta l'intera catena, dal comando MQTT ai byte sulla linea, fino alla
+rilettura. Con `log_level: info` una scrittura produce:
 
 ```
 [NOTICE] Comando ricevuto: tbb/inverter/cmd/smart_port_a = 16
 [INFO] Conversione: 16.0 A -> registro 16  (identita')
 [NOTICE] SmartPort -> registro 0x005E = 16  (interpretato come 16 A, ~3680 W; modalita' registro: ampere)
-[INFO] TX 1/3 (12 byte): 7E FF 11 06 66 0C 00 73 00 0A 98 F6
-[INFO] TX 2/3 (12 byte): 7E FF 11 06 66 0C 00 74 00 0A 29 37
-[INFO] TX 3/3 (12 byte): 7E FF 11 06 06 0C 00 5E 00 10 80 94
+[INFO] TX 1/1 (12 byte): 7E FF 11 06 06 0C 00 5E 00 10 80 94
+[INFO] RX 1/1 (12 byte): 7E 11 FF 06 06 0C 00 5E 00 10 8A F4
+[NOTICE] Rilettura: 0x005E = 16  (confermato), modalita' SmartPort: Smart Load
 ```
 
 Cosa guardare, nell'ordine:
@@ -441,9 +487,12 @@ Cosa guardare, nell'ordine:
 |---|---|
 | manca «Comando ricevuto» | il comando non arriva: controlla il broker MQTT e il prefisso dei topic |
 | «Conversione» mostra un registro diverso da quello atteso | è la modalità del registro: vedi la sezione sopra |
-| i tre `TX` ci sono ma l'inverter non cambia | i byte partono: confrontali con l'esempio stampato nel banner all'avvio |
-| «L'inverter non ha risposto a nessuno dei 3 frame» | plausibile se i sensori funzionano (alcuni firmware non rispondono alle scritture); se anche le letture sono ferme, il problema è la linea RS485 |
-| ogni `TX` ha il suo `RX` con il valore riecheggiato | **l'inverter ha accettato la scrittura**: il problema non è più nella trasmissione. Usa `diag_frames` per capire se il parametro cambia davvero |
+| il `TX` c'è ma l'inverter non cambia | i byte partono: confrontali con l'esempio stampato nel banner all'avvio |
+| «L'inverter non ha risposto al frame» | plausibile se i sensori funzionano (alcuni firmware non rispondono alle scritture); se anche le letture sono ferme, il problema è la linea RS485 |
+| `RX` con il valore riecheggiato | l'inverter ha **ricevuto** la scrittura — l'eco arriva per qualunque valore, quindi da solo non basta |
+| «Rilettura … (confermato)» | il valore è **memorizzato**. Se la potenza non cambia, guarda la modalità della SmartPort |
+| «Rilettura … invece di …» | l'inverter ha ricevuto ma **non memorizzato** il valore |
+| «Rilettura di 0x005E non riuscita» | la lettura dei parametri non è ancora decodificata sul tuo firmware: prova `diag_params` e mandaci il log |
 | «Porta seriale non disponibile» | l'adattatore USB non è aperto: vedi la sezione risoluzione dei problemi |
 
 ### Esito dei comandi
@@ -453,10 +502,15 @@ Cosa guardare, nell'ordine:
 | `<prefix>/cmd/smart_port/status` | `OK` / `ERRORE` |
 | `<prefix>/cmd/smart_port_a/status` | `OK` / `ERRORE` |
 | `<prefix>/cmd/smart_port_w/status` | `OK` / `ERRORE` |
+| `<prefix>/cmd/bat_full_charge/status` | `OK` / `ERRORE` — comando `ON` / `OFF` |
+| `<prefix>/cmd/bat_reserved_capacity/status` | `OK` / `ERRORE` — comando intero 0-100 |
 | `<prefix>/cmd/raw/status` | `OK` / `ERRORE` |
 
-I frame trasmessi da una scrittura (`TX n/3`) e le relative risposte
-(`RX n/3`) compaiono già con `log_level: info`, perché sono rari e sono la
+`ERRORE` arriva anche quando l'inverter risponde con un'**eccezione** (tipo
+`0x86`): il frame è arrivato ma è stato rifiutato.
+
+I frame trasmessi da una scrittura (`TX`) e le relative risposte (`RX`)
+compaiono già con `log_level: info`, perché sono rari e sono la
 prima cosa da guardare. Con `log_level: debug` si aggiungono anche i frame
 esadecimali di **ogni ciclo di lettura**.
 
@@ -495,7 +549,7 @@ corrispondente non viene aggiornato invece di finire a zero.
 | Topic | Unità | Descrizione |
 |---|:---:|---|
 | `ac_out_v` / `ac_out_i` / `ac_out_w` | V / A / W | Prima uscita AC |
-| `ac_out2_v` / `ac_out2_i` / `ac_out2_w` ⚙ | V / A / W | Seconda uscita AC (`ac_out2_w` è calcolato come V × A) |
+| `ac_out2_v` / `ac_out2_i` / `ac_out2_w` | V / A / W | Seconda uscita AC |
 | `ac_out_tot_w` ⚙ | W | Potenza totale erogata: somma delle due uscite |
 | `ac_freq` | Hz | Frequenza di uscita |
 | `load_pct` | % | Carico rispetto alla potenza nominale |
@@ -505,8 +559,57 @@ corrispondente non viene aggiornato invece di finire a zero.
 | Topic | Unità | Descrizione |
 |---|:---:|---|
 | `ac_in_v` | V | Tensione di rete |
-| `ac_in_i` | A | Corrente **con segno**: negativa = stai prelevando dalla rete, positiva = stai immettendo |
-| `ac_in_w` ⚙ | W | Potenza di rete **con segno**: `ac_in_v` × `ac_in_i` |
+| `ac_in_i` | A | Corrente **con segno**, come la riporta l'inverter |
+| `ac_in_w` | W | Potenza di rete **con segno**, misurata dall'inverter |
+| `ac_in_freq` 🔧 | Hz | Frequenza di rete: 0 quando la rete è assente |
+
+### ⛽ Ingresso generatore
+
+Quando la SmartPort lavora come **Smart Gen**, l'energia entra da qui e non
+dall'ingresso di rete: tensione e corrente della SmartPort restano a zero,
+quelle del generatore si muovono.
+
+| Topic | Unità | Descrizione |
+|---|:---:|---|
+| `gen_v` | V | Tensione del generatore |
+| `gen_i` | A | Corrente **con segno** |
+| `gen_w` | W | Potenza **con segno**, misurata dall'inverter |
+| `gen_freq` 🔧 | Hz | Frequenza del generatore |
+
+> ⚠️ **Se aggiorni da una versione fino alla 1.3.3**, la tensione che vedevi
+> come «Tensione rete» era in realtà quella del **generatore**, e la «Frequenza
+> uscita» era quella della **rete**. Dalla 1.3.4 ogni grandezza è al suo posto:
+> lo storico di quelle due entità cambia significato da quel momento.
+
+### 🔋 Controlli della batteria
+
+| Entità | Cosa fa |
+|---|---|
+| **Carica completa batteria** (interruttore) | Attiva o disattiva la carica completa («Battery Full Charge» nell'app TBBLink) |
+| **Capacità riservata batteria** (0-100 %) | SOC che l'inverter tiene di riserva («Battery Reserved Capacity») |
+
+La capacità riservata viene **riletta** dopo ogni modifica e ogni 10 minuti:
+l'entità mostra il valore memorizzato dall'inverter, anche se lo cambi dall'app
+o dal pannello.
+
+La carica completa invece **non si può rileggere** — non lo fa neanche l'app
+ufficiale. L'interruttore mostra l'ultimo comando inviato da Home Assistant:
+è sconosciuto finché non lo usi la prima volta, e non si accorge di un cambio
+fatto dall'app.
+
+```yaml
+action: switch.turn_on
+target:
+  entity_id: switch.tbb_riio_sun_ii_bat_full_charge
+```
+
+```yaml
+action: number.set_value
+target:
+  entity_id: number.tbb_riio_sun_ii_bat_reserved_capacity
+data:
+  value: 30
+```
 
 ### 🌡️ Temperature interne
 

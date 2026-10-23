@@ -61,6 +61,14 @@ configuration:
       rimasti fermi per qualche ciclo. Serve a scoprire dove l'inverter
       rilegge un parametro: attivalo, cambia il valore dall'app nativa e
       guarda quale offset si muove. Tienilo spento nell'uso normale.
+  diag_params:
+    name: Diagnostica dei parametri
+    description: >-
+      Al primo ciclo riuscito legge i parametri di configurazione
+      dell'inverter, come fa l'app ufficiale TBBLink, e li riporta nel log
+      insieme al nome del campo corrispondente. Serve a confrontarli con la
+      schermata dell'app. La lettura non modifica nulla. Tienilo spento
+      nell'uso normale.
   smartport_register_unit:
     name: SmartPort - significato del registro
     description: >-

@@ -15,8 +15,11 @@ questo test blocca.
 
 Due controlli distinti, da non confondere:
 
- 1. i byte trasmessi da `cmd_smart_port(N)` devono restare identici a quelli
-    della versione funzionante, per ogni N -- il trasporto non deve muoversi;
+ 1. il frame che scrive 0x005E deve restare identico a quello della versione
+    funzionante, per ogni N -- formato e CRC non devono muoversi -- ma deve
+    essere l'unica scrittura: i due frame su 0x0073 e 0x0074 che la versione
+    iniziale inviava come "sblocco" sono, nell'app ufficiale, i ritardi di
+    commutazione batteria<->rete, e non vanno piu' toccati;
  2. la catena di conversione deve portare N ampere al registro N.
 
 Esegui dalla radice del repository:
@@ -131,23 +134,42 @@ def frame_da_topic(topic, valore):
     return bytes(T.ser_global.written)
 
 
-# --- 1. il trasporto non e' cambiato --------------------------------------
-# Per ogni valore di registro, i byte sulla seriale devono essere quelli della
-# versione che funzionava: stesso sblocco, stesso CRC, stesso ordine.
+def scritture(flusso):
+    """Divide il flusso trasmesso in frame da 12 byte e tiene quelli di scrittura."""
+    out, i = [], 0
+    while i + 12 <= len(flusso):
+        if flusso[i] == 0x7E and flusso[i + 5] == 0x0C:
+            if flusso[i + 3] == 0x06:
+                out.append(bytes(flusso[i:i + 12]))
+            i += 12
+        else:
+            i += 1
+    return out
+
+
+# --- 1. il formato e' invariato, lo "sblocco" non c'e' piu' ----------------
 accelera(T)
 storico = carica_versione_storica()
 if storico is not None:
     accelera(storico)
+    # Nella versione storica il frame su 0x005E e' l'ultimo dei tre.
     diversi = [n for n in range(0, 101)
-               if frame_di(storico, n) != frame_di(T, n)]
-    check(f"cmd_smart_port(N) emette i byte della {RIFERIMENTO} per ogni N in 0-100",
+               if scritture(frame_di(storico, n))[-1:] != scritture(frame_di(T, n))]
+    check(f"il frame su 0x005E e' quello della {RIFERIMENTO} per ogni N in 0-100",
           not diversi, f"differiscono a: {diversi[:10]}")
 
-    # ...e il topic grezzo deve continuare a passare N senza toccarlo.
     diversi = [n for n in range(0, 101)
-               if frame_di(storico, n) != frame_da_topic("cmd/smart_port", n)]
+               if scritture(frame_di(storico, n))[-1:] != scritture(frame_da_topic("cmd/smart_port", n))]
     check(f"il topic grezzo scrive come la {RIFERIMENTO} su tutta la scala 0-100",
           not diversi, f"differiscono a: {diversi[:10]}")
+
+# Una sola scrittura per comando, e mai sui ritardi di commutazione.
+multiple = [n for n in range(0, 101) if len(scritture(frame_di(T, n))) != 1]
+check("ogni comando SmartPort produce una sola scrittura", not multiple, multiple[:10])
+toccati = sorted({(f[4], f[6] << 8 | f[7]) for n in range(0, 101)
+                  for f in scritture(frame_di(T, n))} - {(0x06, 0x005E)})
+check("nessuna scrittura su registri diversi da 0x005E (in particolare 0x0073/0x0074)",
+      not toccati, [f"cmd {c:#04x} reg {r:#06x}" for c, r in toccati])
 
 
 # --- 2. la conversione porta N ampere al registro N -----------------------
