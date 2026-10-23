@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3.4
+## 2.0.1
 
 ### ⚠️ La SmartPort non sovrascrive più due parametri dell'inverter
 
@@ -16,7 +16,7 @@ L'analisi dell'app ufficiale TBBLink mostra che quei due registri sono
 
 A ogni comando SmartPort, quindi, entrambi venivano riportati a 10. L'app
 scrive ogni parametro con un **frame singolo**, senza alcuno sblocco, e dalla
-1.3.4 l'add-on fa lo stesso: il frame su `0x005E` è identico byte per byte a
+2.0.1 l'add-on fa lo stesso: il frame su `0x005E` è identico byte per byte a
 quello di prima, gli altri due spariscono.
 
 > **Se hai usato una versione precedente**, apri l'app TBBLink e controlla i
