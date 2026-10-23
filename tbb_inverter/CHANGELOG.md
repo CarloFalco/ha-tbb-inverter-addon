@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.1.1
+
+### 🐛 La capacità riservata accettava valori che l'app vieta
+
+L'add-on ammetteva 0-100 %. L'app TBBLink invece applica una regola precisa,
+ora ricavata dal suo codice: la capacità riservata va da **max(15, avviso SOC
+basso + 1)** a **80 %**. Lo slider in Home Assistant ora va da 15 a 80, e prima
+di ogni scrittura l'add-on legge l'avviso di SOC basso dall'inverter (banco A,
+`0x0091`) e rifiuta un valore che non lo superi.
+
+### 🔎 Le soglie di SOC basso della pagina batteria
+
+Individuate nel banco A, con le regole che le legano fra loro e alla capacità
+riservata (dettagli in `PROTOCOLLO.md`):
+
+| Registro | Soglia | Ordine |
+|:---:|---|---|
+| `0x0092` | SOC Low Protect: l'inverter spegne l'uscita | la più bassa (3-40 %) |
+| `0x0091` | SOC Low Warning: avviso | sopra la protezione |
+| `0x0072` (banco B) | Capacità riservata | sopra l'avviso, almeno 15 % |
+| `0x0093` | SOC Charge Enough | almeno 5 punti sopra l'avviso |
+
+Compaiono per nome nel log di `diag_params` e nel file di backup, insieme alle
+tre soglie di tensione corrispondenti. Per ora **non sono scrivibili**: la
+pagina batteria le invia con un costruttore di frame generico, e il comando di
+scrittura non è ancora stato tracciato fino in fondo.
+
+### ✅ Verificato sul campo
+
+- La corrente massima di carica da generatore (`0x005C`) è proprio ciò che
+  limitava il generatore sotto il tetto della SmartPort: alzandola, il
+  generatore sale.
+
 ## 2.1.0
 
 ### ✨ Backup e ripristino dei parametri dell'inverter

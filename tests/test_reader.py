@@ -472,8 +472,8 @@ check("la carica completa e' un interruttore con ON/OFF",
       len(sw) == 1 and sw[0]["payload_on"] == "ON" and sw[0]["payload_off"] == "OFF"
       and sw[0]["command_topic"] == "tbb/inverter/cmd/bat_full_charge", sw)
 riserva = [p for t, p in items if t.endswith("/bat_reserved_capacity/config")]
-check("la capacita' riservata e' un numero 0-100 %",
-      len(riserva) == 1 and (riserva[0]["min"], riserva[0]["max"], riserva[0]["step"]) == (0, 100, 1)
+check("la capacita' riservata e' un numero 15-80 %, come nell'app",
+      len(riserva) == 1 and (riserva[0]["min"], riserva[0]["max"], riserva[0]["step"]) == (15, 80, 1)
       and riserva[0]["unit_of_measurement"] == "%", riserva)
 gen = {p["unique_id"].replace(f"{T.DEVICE_ID}_", "") for t, p in items if "/sensor/" in t}
 check("le grandezze del generatore hanno la loro entita'",

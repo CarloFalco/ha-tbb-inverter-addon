@@ -185,8 +185,48 @@ di questo stato.
 
 Banco B, registro `0x0072` (`Edt_BatReservedCapacity`): la percentuale di SOC
 che l'inverter tiene di riserva. L'app scrive il numero digitato così com'è,
-senza scala. I limiti del campo nell'app non sono stati estratti; l'add-on
-accetta 0-100. 🔎
+senza scala. ✅ Lettura e scrittura verificate sul campo.
+
+### Le soglie di SOC basso e i loro vincoli
+
+La pagina batteria dell'app ha tre soglie SOC, nel banco A, accanto alle
+corrispondenti soglie di tensione: 🔎
+
+| Registro | Campo | Significato | Sul campo |
+|:---:|---|---|---:|
+| `0x0091` | `Edt_SOCLowWarning` | avviso di SOC basso | 8 % |
+| `0x0092` | `Edt_SOCLowProtect` | protezione: l'inverter spegne l'uscita | 5 % |
+| `0x0093` | `Edt_SOCChargeEnough` | SOC a cui la carica si considera sufficiente | 80 % |
+| `0x0044` | `Edt_UndervoltageWarning` | avviso di sottotensione | 11000 = 44,0 V |
+| `0x0043` | `Edt_UndervoltageProtect` | protezione di sottotensione | 10500 = 42,0 V |
+| `0x0042` | `Edt_DeepUndervoltageProtect` | sottotensione profonda | 9900 = 39,6 V |
+
+La pagina batteria comunica avviso e protezione alla pagina di controllo con
+i segnali `socLowWanChange` e `socLowProChange`. Prima di inviare, ciascuna
+pagina verifica ogni campo con una funzione comune, `(minimo, massimo, campo)`.
+Le regole, ricavate da quelle chiamate (R = capacità riservata, A = avviso,
+P = protezione, C = charge enough): 🔎
+
+| Campo | Minimo | Massimo |
+|---|---|---|
+| SOC Low Protect (P) | 3 | min(40, A − 1, R − 1) |
+| SOC Low Warning (A) | max(5, P + 1) | min(R − 1, C − 1) ¹ |
+| Capacità riservata (R) | **max(15, A + 1)** | **80** |
+| SOC Charge Enough (C) | max(30, A + 5) | 99 |
+
+¹ Sul RiiO Sun II con logica d'ingresso «SB…». Con le altre logiche il
+massimo dipende da un altro campo, non identificato.
+
+L'ordine è quindi **P < A < R**, con **C** almeno 5 punti sopra A. La capacità
+riservata **non può scendere sotto il 15 %**, qualunque siano le altre soglie,
+e deve comunque superare l'avviso. Dalla 2.1.1 l'add-on applica la stessa
+regola, leggendo l'avviso dall'inverter.
+
+Queste soglie sono scritte da un costruttore di frame generico,
+`7E FF 11 06 <cmd> 0C <registro> <valore>`, con comando e registro passati come
+argomenti. ❓ Che il comando sia `0x06`, come per gli altri registri del banco
+A, è molto probabile ma non tracciato fino in fondo: per ora l'add-on le legge
+e non le scrive.
 
 ### Modalità e corrente
 
@@ -194,7 +234,7 @@ accetta 0-100. 🔎
 |:---:|:---:|---|---|
 | `0x001F` | A | `Cbo_ACFlexMode` («Smart Port Modeset») | 🔎 `0` Smart Load, `1` Smart Gen, `2` City GEN |
 | `0x005E` | A | `Edt_MaxAlternatorCurrent` | intero, ✅ 5-32 A nell'app |
-| `0x005C` | B | `Edt_MaxGeneratorChargeCurrent` | corrente massima di **carica** da generatore, in A di carica 🔎 |
+| `0x005C` | B | `Edt_MaxGeneratorChargeCurrent` | corrente massima di **carica** da generatore, in A di carica ✅ |
 
 Il nome del campo dice «corrente massima dell'alternatore», cioè del
 generatore. Sul RiiO Sun II l'app mostra il campo in tutte e tre le modalità,

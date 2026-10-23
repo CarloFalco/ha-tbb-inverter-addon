@@ -241,10 +241,22 @@ check("capacita' riservata: se la rilettura differisce pubblica il valore vero",
       pub.ultimi.get("tbb/inverter/bat_reserved_capacity") == 30)
 check("...e lo segnala", any(lv == logging.WARNING for lv, _ in racc.righe))
 
-for cattivo in (-1, 101, 20.5, "30"):
+for cattivo in (-1, 14, 81, 101, 20.5, "30"):
     T.ser_global = Linea()
     check(f"capacita' riservata {cattivo!r} rifiutata senza trasmettere",
           T.cmd_reserved_capacity(cattivo) is False and not T.ser_global.scritto)
+
+# La regola dell'app: la riserva deve superare l'avviso di SOC basso (banco A 0x0091).
+T.ser_global = Linea({(0x03, 0x0091): 20, (0x33, 0x0072): 21})
+check("con l'avviso SOC a 20 %, una riserva di 20 % viene rifiutata",
+      T.cmd_reserved_capacity(20) is False and not scritture(T.ser_global))
+check("...e una di 21 % accettata",
+      T.cmd_reserved_capacity(21) is True and len(scritture(T.ser_global)) == 1)
+T.ser_global = Linea({(0x03, 0x0091): 8, (0x33, 0x0072): 15})
+check("con l'avviso SOC a 8 % (il valore reale) il minimo resta 15 %",
+      T.reserved_capacity_min() == 15 and T.cmd_reserved_capacity(15) is True)
+T.ser_global = None
+check("senza lettura dell'avviso vale il minimo assoluto di 15 %", T.reserved_capacity_min() == 15)
 
 
 # --------------------------------------------------- eccezione di scrittura
@@ -297,7 +309,7 @@ for payload, esito in (("ON", "OK"), ("off", "OK"), ("1", "OK"), ("forse", "ERRO
     check(f"cmd/bat_full_charge = {payload!r} -> {esito}",
           st == esito and (len(w) == 1) == (esito == "OK"), (st, len(w)))
 for payload, esito in (("25", "OK"), ("25.0", "OK"), ("25.5", "ERRORE"),
-                       ("nan", "ERRORE"), ("abc", "ERRORE"), ("150", "ERRORE")):
+                       ("nan", "ERRORE"), ("abc", "ERRORE"), ("150", "ERRORE"), ("10", "ERRORE")):
     st, w = comando("cmd/bat_reserved_capacity", payload)
     check(f"cmd/bat_reserved_capacity = {payload!r} -> {esito}",
           st == esito and (len(w) == 1) == (esito == "OK"), (st, len(w)))

@@ -506,7 +506,7 @@ Cosa guardare, nell'ordine:
 | `<prefix>/cmd/smart_port_a/status` | `OK` / `ERRORE` |
 | `<prefix>/cmd/smart_port_w/status` | `OK` / `ERRORE` |
 | `<prefix>/cmd/bat_full_charge/status` | `OK` / `ERRORE` — comando `ON` / `OFF` |
-| `<prefix>/cmd/bat_reserved_capacity/status` | `OK` / `ERRORE` — comando intero 0-100 |
+| `<prefix>/cmd/bat_reserved_capacity/status` | `OK` / `ERRORE` — comando intero 15-80, sopra l'avviso di SOC basso |
 | `<prefix>/cmd/gen_charge_current/status` | `OK` / `ERRORE` — comando intero 1-100 |
 | `<prefix>/cmd/param_backup/status` | `OK` / `ERRORE` |
 | `<prefix>/cmd/param_restore_preview/status` | `OK` / `ERRORE` — payload: nome del file, o `PRESS` |
@@ -669,7 +669,7 @@ quelle del generatore si muovono.
 | Entità | Cosa fa |
 |---|---|
 | **Carica completa batteria** (interruttore) | Attiva o disattiva la carica completa («Battery Full Charge» nell'app TBBLink) |
-| **Capacità riservata batteria** (0-100 %) | SOC che l'inverter tiene di riserva («Battery Reserved Capacity») |
+| **Capacità riservata batteria** (15-80 %) | SOC che l'inverter tiene di riserva («Battery Reserved Capacity») |
 | **Corrente max carica da generatore** (1-100 A) | Quanta corrente di carica la batteria può prendere dal generatore |
 
 > 💡 **Il generatore non sale fino al tetto della SmartPort?** Il tetto
@@ -678,6 +678,12 @@ quelle del generatore si muovono.
 > batteria. Se la carica dal generatore è limitata, per esempio a 5 A, il
 > generatore resta ben sotto il tetto. Alza la *Corrente max carica da
 > generatore* e la potenza del generatore dovrebbe salire, fino al tetto.
+
+> **Quanto può scendere la capacità riservata?** Le stesse regole dell'app:
+> **almeno 15 %**, e comunque **sopra l'avviso di SOC basso** (pagina batteria
+> dell'app); al massimo 80 %. L'ordine delle soglie è *protezione* (l'inverter
+> spegne l'uscita) < *avviso* < *capacità riservata*. Abbassare la protezione
+> non abbassa il minimo della riserva: il limite di 15 % resta.
 
 Capacità riservata e corrente di carica vengono **rilette** dopo ogni modifica e ogni 10 minuti:
 l'entità mostra il valore memorizzato dall'inverter, anche se lo cambi dall'app

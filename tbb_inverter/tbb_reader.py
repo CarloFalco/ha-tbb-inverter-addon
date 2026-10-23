@@ -163,6 +163,17 @@ GEN_CHARGE_MIN, GEN_CHARGE_MAX = 1, 100
 
 REG_SYSTEM_VOLTAGE = 0x0004   # banco A: tensione nominale di sistema in mV (48000)
 
+# Soglie SOC della pagina batteria dell'app (banco A). Sono legate fra loro e alla
+# capacita' riservata da regole che l'app applica prima di inviare:
+#   SOC Low Protect   3 .. min(40, avviso - 1, riservata - 1)
+#   SOC Low Warning   max(5, protezione + 1) .. min(riservata - 1, charge enough - 1)
+#   riservata         max(15, avviso + 1) .. 80
+#   SOC Charge Enough max(30, avviso + 5) .. 99
+REG_SOC_LOW_WARNING   = 0x0091
+REG_SOC_LOW_PROTECT   = 0x0092
+REG_SOC_CHARGE_ENOUGH = 0x0093
+RESERVED_MIN, RESERVED_MAX = 15, 80
+
 # Registri che l'app ufficiale sa scrivere dalla propria schermata impostazioni,
 # per banco di lettura. Sono gli unici che il ripristino tocca: gli altri sono
 # misure, dati di targa o parametri di fabbrica.
@@ -775,15 +786,33 @@ def write_param(banco_scrittura: int, registro: int, valore: int, etichetta: str
     return stato
 
 
+def reserved_capacity_min() -> int:
+    """
+    Minimo ammesso per la capacita' riservata: max(15, avviso SOC basso + 1),
+    la stessa regola dell'app. Se l'avviso non si legge vale il minimo assoluto.
+    """
+    avviso = read_registers(BANK_A_READ, REG_SOC_LOW_WARNING, 1)
+    if avviso and avviso[0] < 100:
+        return max(RESERVED_MIN, avviso[0] + 1)
+    return RESERVED_MIN
+
+
 def cmd_reserved_capacity(valore: int) -> bool:
     """
     Imposta la capacita' riservata della batteria (SOC minimo, %) e la rilegge.
 
-    L'inverter riecheggia qualunque valore: il controllo 0-100 e' l'unica
-    difesa contro una percentuale impossibile.
+    L'inverter riecheggia qualunque valore, quindi i limiti li imponiamo noi,
+    con le regole dell'app: fra max(15, avviso SOC basso + 1) e 80. Sotto
+    l'avviso la riserva perderebbe senso, e l'app non lo permette.
     """
-    if not isinstance(valore, int) or not 0 <= valore <= 100:
-        log.warning("Capacita' riservata non valida: %r (ammessi 0-100 %%)", valore)
+    if not isinstance(valore, int) or not RESERVED_MIN <= valore <= RESERVED_MAX:
+        log.warning("Capacita' riservata non valida: %r (ammessi %d-%d %%)",
+                    valore, RESERVED_MIN, RESERVED_MAX)
+        return False
+    minimo = reserved_capacity_min()
+    if valore < minimo:
+        log.warning("Capacita' riservata %d %% rifiutata: deve superare l'avviso di SOC "
+                    "basso, quindi almeno %d %% (regola dell'app TBBLink)", valore, minimo)
         return False
     return write_param(BANK_B_WRITE, REG_BAT_RESERVED, valore,
                        "capacita' riservata batteria (%)", T_RESERVED_STATE) is not None
@@ -1046,6 +1075,12 @@ PARAM_NAMES = {
     (_A, 0x003C): ("comboBox_BackflowEnable",    "Anti-immissione abilitata (indice)",   ""),
     (_A, 0x005D): ("Cbo_AcInByPassConnect",      "Bypass ingresso AC (indice)",          ""),
     (_A, 0x005E): ("Edt_MaxAlternatorCurrent",   "Corrente massima generatore",          "A"),
+    (_A, 0x0042): ("Edt_DeepUndervoltageProtect", "Batteria: sottotensione profonda (spegne l'inverter)", "mV"),
+    (_A, 0x0043): ("Edt_UndervoltageProtect",    "Batteria: protezione sottotensione (spegne l'uscita)", "mV"),
+    (_A, 0x0044): ("Edt_UndervoltageWarning",    "Batteria: avviso sottotensione",       "mV"),
+    (_A, 0x0091): ("Edt_SOCLowWarning",          "Batteria: avviso SOC basso",           "%"),
+    (_A, 0x0092): ("Edt_SOCLowProtect",          "Batteria: protezione SOC basso (spegne l'uscita)", "%"),
+    (_A, 0x0093): ("Edt_SOCChargeEnough",        "Batteria: SOC di carica sufficiente",  "%"),
     (_A, 0x00C1): ("comboBox_Relay1Func",        "Funzione rele' 1",                     ""),
     (_A, 0x00C2): ("comboBox_Relay2Func",        "Funzione rele' 2",                     ""),
 
@@ -1617,7 +1652,7 @@ def discovery_payloads() -> list[tuple[str, dict]]:
             "command_topic": T_CMD_RESERVED,
             "state_topic": T_RESERVED_STATE,
             "unit_of_measurement": "%",
-            "min": 0, "max": 100, "step": 1,
+            "min": RESERVED_MIN, "max": RESERVED_MAX, "step": 1,
             "mode": "box",
             "icon": "mdi:battery-lock",
             "entity_category": "config",
