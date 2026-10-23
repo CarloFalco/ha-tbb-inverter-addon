@@ -285,8 +285,10 @@ check("una carica completa rifiutata non pubblica uno stato falso",
 # --------------------------------------------------- rilettura periodica
 pub.ultimi.clear()
 T.ser_global = Linea({(0x03, 0x005E): 18, (0x03, 0x001F): 1, (0x33, 0x0072): 40,
-                      (0x33, 0x005C): 5})
-check("la rilettura periodica legge i quattro parametri", T.refresh_parameters() == 4)
+                      (0x33, 0x005C): 5, (0x03, 0x0056): 14})
+check("la rilettura periodica legge i cinque parametri", T.refresh_parameters() == 5)
+check("...compresa la corrente massima da rete",
+      pub.ultimi.get("tbb/inverter/grid_current_max") == 14, pub.ultimi)
 check("...e pubblica SmartPort, modalita', capacita' riservata e carica da generatore",
       pub.ultimi.get("tbb/inverter/smart_port_a") == 18
       and pub.ultimi.get("tbb/inverter/smart_port_mode") == "Smart Gen"

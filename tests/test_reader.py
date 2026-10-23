@@ -453,9 +453,14 @@ for readme, schema in (("README.md", r"badge/add--on-([0-9.]+)-"),
 # ---------------------------------------------------------------- discovery
 items = T.discovery_payloads()
 # sensori + 3 slider SmartPort + modalita' SmartPort + carica completa
-# + capacita' riservata + carica da generatore + 3 pulsanti backup/ripristino
+# + capacita' riservata + carica da generatore + corrente da rete
+# + 3 pulsanti backup/ripristino
 check("discovery genera un'entita' per sensore + i controlli",
-      len(items) == len(T.SENSORS) + 10, len(items))
+      len(items) == len(T.SENSORS) + 11, len(items))
+rete = [p for t, p in items if t.endswith("/grid_current_max/config")]
+check("la corrente massima da rete e' un numero 5-32 A",
+      len(rete) == 1 and (rete[0]["min"], rete[0]["max"]) == (5, 32)
+      and rete[0]["command_topic"] == "tbb/inverter/cmd/grid_current_max", rete)
 per_tipo = {t.split("/")[1] for t, _ in items}
 check("discovery usa sensor, number, switch e button",
       per_tipo == {"sensor", "number", "switch", "button"}, per_tipo)

@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.2.0
+
+### ✨ Corrente massima prelevata dalla rete
+
+Nuova entità `number.tbb_riio_sun_ii_grid_current_max` (5-32 A): è il «Power
+Assist Current» dell'ingresso AC 1 nella pagina *AC Input* dell'app (banco A,
+registro `0x0056`). È la corrente massima che l'inverter può prelevare dalla
+rete, carico compreso: oltre, integra con la batteria, e la carica usa solo ciò
+che resta sotto il limite.
+
+È il parametro che limita la **carica completa**. Sul campo valeva 14 A: 14 A ×
+240 V ≈ 3,3 kW, proprio i ~3,2 kW prelevati dalla rete attivando
+l'interruttore. Per caricare più piano basta abbassarla, per esempio a 8 A ≈
+1,9 kW.
+
+Il limite dell'app per il RiiO Sun II dipende dalla variante (per lo più
+50 A): l'add-on si ferma prudenzialmente a 32 A. Il valore viene riletto dopo
+ogni modifica e ogni 10 minuti, ed entra nel backup tra i parametri
+ripristinabili.
+
+### 🔎 Il tetto della SmartPort ha un nome
+
+`0x005E` è, nella pagina *AC Input* dell'app, il «Power Assist Current»
+dell'ingresso AC 2: la stessa grandezza di `0x0056`, ma per il generatore.
+
 ## 2.1.1
 
 ### 🐛 La capacità riservata accettava valori che l'app vieta

@@ -126,6 +126,8 @@ T_CMD_RESERVED      = f"{MQTT_PREFIX}/cmd/bat_reserved_capacity"
 T_RESERVED_STATE    = f"{MQTT_PREFIX}/bat_reserved_capacity"
 T_CMD_GEN_CHARGE    = f"{MQTT_PREFIX}/cmd/gen_charge_current"
 T_GEN_CHARGE_STATE  = f"{MQTT_PREFIX}/gen_charge_current"
+T_CMD_GRID_CURRENT  = f"{MQTT_PREFIX}/cmd/grid_current_max"
+T_GRID_CURRENT_STATE = f"{MQTT_PREFIX}/grid_current_max"
 
 # Backup, anteprima e ripristino dei parametri di configurazione.
 T_CMD_BACKUP          = f"{MQTT_PREFIX}/cmd/param_backup"
@@ -161,6 +163,16 @@ PARAM_REFRESH_S = 600     # ogni quanto rileggere i parametri esposti in HA
 REG_GEN_CHARGE = 0x005C
 GEN_CHARGE_MIN, GEN_CHARGE_MAX = 1, 100
 
+# Corrente massima prelevata dalla rete: "Power Assist Current" dell'ingresso AC 1
+# nella pagina AC Input dell'app (banco A). Oltre questa corrente l'inverter
+# integra con la batteria, e la carica usa solo cio' che resta sotto il limite:
+# e' il tetto anche della carica completa da rete. E' il gemello di 0x005E, il
+# "Power Assist Current" dell'ingresso AC 2 (il generatore sulla SmartPort).
+# L'app ammette 5 A fino a un massimo che dipende dalla variante del RiiO Sun II
+# (per lo piu' 50 A): qui si resta prudenzialmente entro 32 A.
+REG_GRID_CURRENT = 0x0056
+GRID_CURRENT_MIN, GRID_CURRENT_MAX = 5, 32
+
 REG_SYSTEM_VOLTAGE = 0x0004   # banco A: tensione nominale di sistema in mV (48000)
 
 # Soglie SOC della pagina batteria dell'app (banco A). Sono legate fra loro e alla
@@ -178,7 +190,7 @@ RESERVED_MIN, RESERVED_MAX = 15, 80
 # per banco di lettura. Sono gli unici che il ripristino tocca: gli altri sono
 # misure, dati di targa o parametri di fabbrica.
 WRITABLE = {
-    BANK_A_READ: frozenset({0x0010, 0x0016, 0x001F, 0x003C, 0x005D, 0x005E, 0x00C1, 0x00C2}),
+    BANK_A_READ: frozenset({0x0010, 0x0016, 0x001F, 0x003C, 0x0056, 0x005D, 0x005E, 0x00C1, 0x00C2}),
     BANK_B_READ: frozenset(
         {0x0007, 0x0012, 0x0013, 0x0014, 0x0015, 0x0016}
         | set(range(0x0018, 0x0029))           # generatore, rele', fasce orarie rete
@@ -828,6 +840,16 @@ def cmd_gen_charge_current(valore: int) -> bool:
                        "corrente max di carica da generatore (A)", T_GEN_CHARGE_STATE) is not None
 
 
+def cmd_grid_current(valore: int) -> bool:
+    """Imposta la corrente massima prelevata dalla rete (A) e la rilegge."""
+    if not isinstance(valore, int) or not GRID_CURRENT_MIN <= valore <= GRID_CURRENT_MAX:
+        log.warning("Corrente massima da rete non valida: %r (ammessi %d-%d A)",
+                    valore, GRID_CURRENT_MIN, GRID_CURRENT_MAX)
+        return False
+    return write_param(BANK_A_WRITE, REG_GRID_CURRENT, valore,
+                       "corrente massima da rete (A)", T_GRID_CURRENT_STATE) is not None
+
+
 def refresh_parameters() -> int:
     """
     Rilegge i parametri esposti come entita' e ne pubblica lo stato, cosi' Home
@@ -857,8 +879,14 @@ def refresh_parameters() -> int:
         riuscite += 1
         if mqtt_client is not None:
             mqtt_client.publish(T_GEN_CHARGE_STATE, carica_gen[0], retain=True)
+    rete = read_registers(BANK_A_READ, REG_GRID_CURRENT, 1)
+    if rete:
+        riuscite += 1
+        if mqtt_client is not None:
+            mqtt_client.publish(T_GRID_CURRENT_STATE, rete[0], retain=True)
     log.debug("Parametri riletti: SmartPort %s, modalita' %s, capacita' riservata %s, "
-              "carica da generatore %s", corrente, modo, riserva, carica_gen)
+              "carica da generatore %s, corrente da rete %s",
+              corrente, modo, riserva, carica_gen, rete)
     return riuscite
 
 
@@ -1074,7 +1102,9 @@ PARAM_NAMES = {
     (_A, 0x001F): ("Cbo_ACFlexMode",             "Modalita' SmartPort (0 Smart Load, 1 Smart Gen, 2 City GEN)", ""),
     (_A, 0x003C): ("comboBox_BackflowEnable",    "Anti-immissione abilitata (indice)",   ""),
     (_A, 0x005D): ("Cbo_AcInByPassConnect",      "Bypass ingresso AC (indice)",          ""),
-    (_A, 0x005E): ("Edt_MaxAlternatorCurrent",   "Corrente massima generatore",          "A"),
+    (_A, 0x005E): ("Edt_MaxAlternatorCurrent",   "Corrente massima generatore (Power Assist AC in 2)", "A"),
+    (_A, 0x0056): ("Edt_PowerAssistCurrent",     "Corrente massima da rete (Power Assist AC in 1)", "A"),
+    (_A, 0x0046): ("Edt_MaxChargeCurrent",       "Batteria: corrente massima di carica (unita' da verificare)", ""),
     (_A, 0x0042): ("Edt_DeepUndervoltageProtect", "Batteria: sottotensione profonda (spegne l'inverter)", "mV"),
     (_A, 0x0043): ("Edt_UndervoltageProtect",    "Batteria: protezione sottotensione (spegne l'uscita)", "mV"),
     (_A, 0x0044): ("Edt_UndervoltageWarning",    "Batteria: avviso sottotensione",       "mV"),
@@ -1675,6 +1705,22 @@ def discovery_payloads() -> list[tuple[str, dict]]:
             **comune,
         },
     ))
+    items.append((
+        f"{DISCOVERY_PREFIX}/number/{DEVICE_ID}/grid_current_max/config",
+        {
+            "name": "Corrente massima da rete",
+            "unique_id": f"{DEVICE_ID}_grid_current_max",
+            "object_id": f"{DEVICE_ID}_grid_current_max",
+            "command_topic": T_CMD_GRID_CURRENT,
+            "state_topic": T_GRID_CURRENT_STATE,
+            "unit_of_measurement": "A",
+            "min": GRID_CURRENT_MIN, "max": GRID_CURRENT_MAX, "step": 1,
+            "mode": "box",
+            "icon": "mdi:transmission-tower-import",
+            "entity_category": "config",
+            **comune,
+        },
+    ))
     for key, nome, topic, icona in (
         ("param_backup", "Backup parametri inverter", T_CMD_BACKUP, "mdi:content-save"),
         ("param_restore_preview", "Anteprima ripristino parametri", T_CMD_RESTORE_PREVIEW,
@@ -1787,6 +1833,7 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     # broker una subscribe fatta una volta sola all'avvio andrebbe persa.
     topics = ([(t, 0) for t in SMARTPORT_COMMANDS]
               + [(t, 0) for t in (T_CMD_FULL_CHARGE, T_CMD_RESERVED, T_CMD_GEN_CHARGE,
+                                  T_CMD_GRID_CURRENT,
                                   T_CMD_BACKUP, T_CMD_RESTORE_PREVIEW, T_CMD_RESTORE,
                                   T_CMD_RAW)])
     client.subscribe(topics)
@@ -1862,13 +1909,15 @@ def on_message(client, userdata, msg):
                 ok = False
             client.publish(f"{msg.topic}/status", "OK" if ok else "ERRORE")
 
-        elif msg.topic in (T_CMD_RESERVED, T_CMD_GEN_CHARGE):
+        elif msg.topic in (T_CMD_RESERVED, T_CMD_GEN_CHARGE, T_CMD_GRID_CURRENT):
             valore = _payload_intero(payload)
             if valore is None:
                 log.warning("Valore non numerico o non intero su %s: %r", msg.topic, payload)
                 client.publish(f"{msg.topic}/status", "ERRORE")
                 return
-            comando = cmd_reserved_capacity if msg.topic == T_CMD_RESERVED else cmd_gen_charge_current
+            comando = {T_CMD_RESERVED: cmd_reserved_capacity,
+                       T_CMD_GEN_CHARGE: cmd_gen_charge_current,
+                       T_CMD_GRID_CURRENT: cmd_grid_current}[msg.topic]
             ok = comando(valore)
             client.publish(f"{msg.topic}/status", "OK" if ok else "ERRORE")
 

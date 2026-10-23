@@ -177,6 +177,7 @@ le entità già configurate:
 | **Carica completa batteria** *(interruttore)* | — | `switch.tbb_riio_sun_ii_bat_full_charge` |
 | **Capacità riservata batteria** *(scrivibile)* | % | `number.tbb_riio_sun_ii_bat_reserved_capacity` |
 | **Corrente max carica da generatore** *(scrivibile)* | A | `number.tbb_riio_sun_ii_gen_charge_current` |
+| **Corrente massima da rete** *(scrivibile)* | A | `number.tbb_riio_sun_ii_grid_current_max` |
 | Backup / Anteprima ripristino / Ripristina parametri *(pulsanti)* | — | `button.tbb_riio_sun_ii_param_backup` … |
 
 Le voci con ⚙ sono [canali calcolati](#-canali-calcolati). `bat_status` vale
@@ -508,6 +509,7 @@ Cosa guardare, nell'ordine:
 | `<prefix>/cmd/bat_full_charge/status` | `OK` / `ERRORE` — comando `ON` / `OFF` |
 | `<prefix>/cmd/bat_reserved_capacity/status` | `OK` / `ERRORE` — comando intero 15-80, sopra l'avviso di SOC basso |
 | `<prefix>/cmd/gen_charge_current/status` | `OK` / `ERRORE` — comando intero 1-100 |
+| `<prefix>/cmd/grid_current_max/status` | `OK` / `ERRORE` — comando intero 5-32 |
 | `<prefix>/cmd/param_backup/status` | `OK` / `ERRORE` |
 | `<prefix>/cmd/param_restore_preview/status` | `OK` / `ERRORE` — payload: nome del file, o `PRESS` |
 | `<prefix>/cmd/param_restore/status` | `OK` / `ERRORE` — payload: nome del file, o `PRESS` |
@@ -544,13 +546,13 @@ Una riga per parametro: banco (`A` o `B`), registro, valore. Tutto ciò che
 segue `#` è un commento.
 
 ```
-# --- Parametri ripristinabili (93) ------------------------------
+# --- Parametri ripristinabili (94) ------------------------------
 A 0x001f     1   # Modalita' SmartPort (0 Smart Load, 1 Smart Gen, 2 City GEN)  [Cbo_ACFlexMode]
 A 0x005e     7   # Corrente massima generatore A  [Edt_MaxAlternatorCurrent]
 B 0x002b 12000   # Ingresso AC: disconnetti sopra tensione batteria (12.00 V per blocco da 12 V = 48.00 V)  [lineEdit_ACI_DisconnectBAT]
 B 0x005c     5   # Corrente massima di carica da generatore / AC in 2  [Edt_MaxGeneratorChargeCurrent]
 ...
-# --- Solo lettura o non mappati, ignorati dal ripristino (367) ---
+# --- Solo lettura o non mappati, ignorati dal ripristino (366) ---
 #~ A 0x0000  2300
 #~ A 0x0004 48000
 ...
@@ -671,6 +673,7 @@ quelle del generatore si muovono.
 | **Carica completa batteria** (interruttore) | Attiva o disattiva la carica completa («Battery Full Charge» nell'app TBBLink) |
 | **Capacità riservata batteria** (15-80 %) | SOC che l'inverter tiene di riserva («Battery Reserved Capacity») |
 | **Corrente max carica da generatore** (1-100 A) | Quanta corrente di carica la batteria può prendere dal generatore |
+| **Corrente massima da rete** (5-32 A) | Quanta corrente l'inverter può prelevare dalla rete, carico più carica («Power Assist Current») |
 
 > 💡 **Il generatore non sale fino al tetto della SmartPort?** Il tetto
 > (`SmartPort corrente`, registro `0x005E`) è un *massimo*: l'inverter preleva
@@ -688,6 +691,14 @@ quelle del generatore si muovono.
 Capacità riservata e corrente di carica vengono **rilette** dopo ogni modifica e ogni 10 minuti:
 l'entità mostra il valore memorizzato dall'inverter, anche se lo cambi dall'app
 o dal pannello.
+
+> ⚠️ **Prima di attivare la carica completa, guarda la corrente massima da
+> rete.** La carica completa carica la batteria con tutto quello che la rete
+> può dare: il limite è la *Corrente massima da rete*. Con 14 A, il valore
+> trovato su un RiiO Sun II, sono ~3,3 kW a 240 V. Il limite comprende anche il
+> carico: oltre quella corrente l'inverter integra con la batteria, e la carica
+> prende solo ciò che resta. Per caricare più piano, abbassala prima di
+> attivare la carica completa: per esempio 8 A ≈ 1,9 kW.
 
 La carica completa invece **non si può rileggere** — non lo fa neanche l'app
 ufficiale. L'interruttore mostra l'ultimo comando inviato da Home Assistant:

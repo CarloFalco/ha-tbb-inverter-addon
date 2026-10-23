@@ -228,6 +228,33 @@ argomenti. ❓ Che il comando sia `0x06`, come per gli altri registri del banco
 A, è molto probabile ma non tracciato fino in fondo: per ora l'add-on le legge
 e non le scrive.
 
+### Correnti massime degli ingressi AC («Power Assist Current»)
+
+Nella pagina *AC Input* dell'app ogni ingresso ha il suo «Power Assist
+Current»: la corrente massima prelevabile da quell'ingresso. Oltre, l'inverter
+integra con la batteria; la carica usa solo ciò che resta sotto il limite. 🔎
+
+| Registro | Banco | Campo | Ingresso | Sul campo |
+|:---:|:---:|---|---|---:|
+| `0x0056` | A | `Edt_PowerAssistCurrent` | AC in 1, la **rete** | 14 A |
+| `0x005E` | A | `Edt_Acin2PowerAssistCurrent` | AC in 2, il **generatore** sulla SmartPort | 7 A |
+
+`0x005E` è lo stesso registro che la pagina di controllo chiama
+`Edt_MaxAlternatorCurrent`: è il tetto della SmartPort, già verificato sul
+campo. ✅
+
+Per il RiiO l'app ammette per `0x0056` un minimo di 5 A e un massimo preso da
+una tabella per modello: per la maggior parte delle varianti del RiiO Sun II
+50 A, per alcune 16, 20 o 32 A. L'add-on, prudenzialmente, si ferma a 32 A.
+
+Con 14 A sulla rete la carica completa preleva ~3,3 kW a 240 V, coerente con i
+~3,2 kW osservati sul campo.
+
+La pagina batteria ha anche un `Edt_MaxChargeCurrent` (banco A `0x0046`, 30 sul
+campo): la corrente massima di carica della batteria. ❓ Unità non verificata:
+durante la carica completa la corrente di batteria supera i 30 A, quindi o
+l'unità non è l'ampere, o in quella modalità il limite non si applica.
+
 ### Modalità e corrente
 
 | Registro | Banco | Campo | Valori |

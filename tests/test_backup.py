@@ -317,6 +317,23 @@ for cattivo in ("0", "101", "7.5", "dieci"):
     check(f"cmd/gen_charge_current = {cattivo!r} rifiutato senza scrivere",
           comando("cmd/gen_charge_current", cattivo) == "ERRORE" and not inv.scritture)
 
+# Corrente massima da rete: Power Assist dell'ingresso AC 1, banco A 0x0056.
+# Sul campo valeva 14 A, ed e' il tetto dei ~3,2 kW presi dalla rete in carica completa.
+inv = nuovo_inverter()
+check("la corrente massima da rete letta dal campo vale 14 A",
+      inv.regs[(T.BANK_A_READ, 0x0056)] == 14)
+check("cmd/grid_current_max = 8 scrive il banco A, registro 0x0056, con il comando 0x06",
+      comando("cmd/grid_current_max", "8") == "OK" and inv.scritture == [(0x06, 0x0056, 8)],
+      inv.scritture)
+check("...e la conferma in rilettura",
+      T.mqtt_client.pub.get("tbb/inverter/grid_current_max") == 8, T.mqtt_client.pub)
+for cattivo in ("4", "33", "10.5", "tanto"):
+    inv = nuovo_inverter()
+    check(f"cmd/grid_current_max = {cattivo!r} rifiutato senza scrivere",
+          comando("cmd/grid_current_max", cattivo) == "ERRORE" and not inv.scritture)
+check("il backup rende ripristinabile la corrente massima da rete",
+      T.scrivibile(T.BANK_A_READ, 0x0056))
+
 T.ser_global = None
 T.mqtt_client = None
 
