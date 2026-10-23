@@ -1,5 +1,56 @@
 # Changelog
 
+## 2.1.0
+
+### ✨ Backup e ripristino dei parametri dell'inverter
+
+Tre nuovi pulsanti in Home Assistant, per salvare e ripristinare la
+configurazione senza l'app TBBLink:
+
+| Pulsante | Cosa fa |
+|---|---|
+| **Backup parametri inverter** | Legge tutti i ~460 registri che legge l'app e li salva in `/share/tbb_inverter/backup_<data>.txt` |
+| **Anteprima ripristino parametri** | Confronta `/share/tbb_inverter/ripristina.txt` con l'inverter ed elenca nel log cosa cambierebbe. Non scrive nulla |
+| **Ripristina parametri inverter** | Scrive i valori diversi e li rilegge uno per uno |
+
+Il file è di testo, una riga per parametro, con nome e significato in
+commento: si può modificare a mano. Il ripristino è volutamente prudente:
+
+- scrive **solo i ~90 parametri che l'app stessa sa scrivere**; misure, dati di
+  targa e registri di fabbrica stanno nel backup ma commentati, e vengono
+  ignorati;
+- scrive **solo i valori diversi** da quelli attuali, e li verifica in
+  rilettura;
+- non scrive mai `65535` (non usato), né su un registro che sull'inverter vale
+  65535;
+- rifiuta **l'intero file** se anche una sola riga non è valida;
+- accetta solo un nome di file semplice dentro `/share/tbb_inverter`.
+
+Backup e ripristino girano in un thread a parte, uno alla volta, così il
+collegamento MQTT non si blocca durante le decine di secondi necessarie.
+
+### ✨ Corrente massima di carica da generatore
+
+Nuova entità `number.tbb_riio_sun_ii_gen_charge_current` (banco B, registro
+`0x005C`), con rilettura dopo ogni modifica e ogni 10 minuti. Sul campo valeva
+5, e la carica della batteria dal generatore si fermava proprio a ~5-6 A: è il
+candidato principale per spiegare perché il generatore non sale fino al tetto
+impostato in `0x005E`.
+
+### 🐛 Le soglie di tensione erano mostrate 4 volte più basse
+
+I parametri di tensione dell'inverter sono espressi **per blocco da 12 V**: su
+un sistema a 48 V, `12000` vale 12,00 V × 4 = 48,00 V. Il log li mostrava come
+«12.00 V». Ora il fattore viene ricavato dalla tensione nominale letta
+dall'inverter (banco A, `0x0004` = 48000) e li riporta in entrambe le forme.
+
+### 🔧 Sviluppo
+
+- Nuova suite `tests/test_backup.py`, costruita su **dati reali**: i ~460
+  parametri e i frame `C0`/`C1` letti da un RiiO Sun II 8.0S. I frame vengono
+  decodificati e confrontati con i valori che l'add-on ha mostrato in quel
+  ciclo, e il bilancio energetico deve chiudere entro il 5 %.
+
 ## 2.0.1
 
 ### ⚠️ La SmartPort non sovrascrive più due parametri dell'inverter

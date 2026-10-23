@@ -8,6 +8,7 @@ Esegui dalla radice del repository:
 import json
 import os
 import random
+import re
 import sys
 import types
 from pathlib import Path
@@ -431,13 +432,41 @@ check("publish non inventa chiavi assenti", "tbb/inverter/bat_v" not in topics, 
 payload = json.loads([p for t, p, _ in mc.published if t == "tbb/inverter/stato"][0])
 check("il JSON aggregato contiene solo le chiavi lette", set(payload) == {"pv_w", "soc"})
 
+# ---------------------------------------------------------------- versione
+# I badge nei README sono testo scritto a mano: Home Assistant mostra la
+# versione presa da config.yaml, ma la pagina dell'add-on mostra il badge.
+# La 2.0.1 e' uscita con il badge ancora fermo alla 1.3.1.
+RADICE = Path(__file__).resolve().parent.parent
+cfg = (RADICE / "tbb_inverter" / "config.yaml").read_text(encoding="utf-8")
+versione = re.search(r'^version:\s*"([^"]+)"', cfg, re.M).group(1)
+chlog = (RADICE / "tbb_inverter" / "CHANGELOG.md").read_text(encoding="utf-8")
+check("la prima voce del CHANGELOG e' la versione di config.yaml",
+      re.search(r"^## (\S+)", chlog, re.M).group(1) == versione, versione)
+for readme, schema in (("README.md", r"badge/add--on-([0-9.]+)-"),
+                       ("tbb_inverter/README.md", r"badge/versione-([0-9.]+)-")):
+    trovata = re.search(schema, (RADICE / readme).read_text(encoding="utf-8"))
+    check(f"il badge di {readme} riporta la versione di config.yaml",
+          trovata is not None and trovata.group(1) == versione,
+          trovata.group(1) if trovata else "badge non trovato")
+
+
 # ---------------------------------------------------------------- discovery
 items = T.discovery_payloads()
-# sensori + 3 slider SmartPort + modalita' SmartPort + carica completa + capacita' riservata
+# sensori + 3 slider SmartPort + modalita' SmartPort + carica completa
+# + capacita' riservata + carica da generatore + 3 pulsanti backup/ripristino
 check("discovery genera un'entita' per sensore + i controlli",
-      len(items) == len(T.SENSORS) + 6, len(items))
+      len(items) == len(T.SENSORS) + 10, len(items))
 per_tipo = {t.split("/")[1] for t, _ in items}
-check("discovery usa sensor, number e switch", per_tipo == {"sensor", "number", "switch"}, per_tipo)
+check("discovery usa sensor, number, switch e button",
+      per_tipo == {"sensor", "number", "switch", "button"}, per_tipo)
+pulsanti = {p["command_topic"] for t, p in items if "/button/" in t}
+check("i pulsanti di backup, anteprima e ripristino hanno ciascuno il proprio comando",
+      pulsanti == {"tbb/inverter/cmd/param_backup", "tbb/inverter/cmd/param_restore_preview",
+                   "tbb/inverter/cmd/param_restore"}, pulsanti)
+carica_gen = [p for t, p in items if t.endswith("/gen_charge_current/config")]
+check("la corrente max di carica da generatore e' un numero in ampere",
+      len(carica_gen) == 1 and carica_gen[0]["unit_of_measurement"] == "A"
+      and carica_gen[0]["command_topic"] == "tbb/inverter/cmd/gen_charge_current", carica_gen)
 sw = [p for t, p in items if "/switch/" in t]
 check("la carica completa e' un interruttore con ON/OFF",
       len(sw) == 1 and sw[0]["payload_on"] == "ON" and sw[0]["payload_off"] == "OFF"

@@ -272,12 +272,14 @@ check("una carica completa rifiutata non pubblica uno stato falso",
 
 # --------------------------------------------------- rilettura periodica
 pub.ultimi.clear()
-T.ser_global = Linea({(0x03, 0x005E): 18, (0x03, 0x001F): 1, (0x33, 0x0072): 40})
-check("la rilettura periodica legge i tre parametri", T.refresh_parameters() == 3)
-check("...e pubblica corrente SmartPort, modalita' e capacita' riservata",
+T.ser_global = Linea({(0x03, 0x005E): 18, (0x03, 0x001F): 1, (0x33, 0x0072): 40,
+                      (0x33, 0x005C): 5})
+check("la rilettura periodica legge i quattro parametri", T.refresh_parameters() == 4)
+check("...e pubblica SmartPort, modalita', capacita' riservata e carica da generatore",
       pub.ultimi.get("tbb/inverter/smart_port_a") == 18
       and pub.ultimi.get("tbb/inverter/smart_port_mode") == "Smart Gen"
-      and pub.ultimi.get("tbb/inverter/bat_reserved_capacity") == 40, pub.ultimi)
+      and pub.ultimi.get("tbb/inverter/bat_reserved_capacity") == 40
+      and pub.ultimi.get("tbb/inverter/gen_charge_current") == 5, pub.ultimi)
 check("la rilettura periodica non scrive nulla", not scritture(T.ser_global))
 
 # --------------------------------------------------- comandi via MQTT

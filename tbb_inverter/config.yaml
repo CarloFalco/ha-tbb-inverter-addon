@@ -1,5 +1,5 @@
 name: "TBB Inverter Reader"
-version: "2.0.1"
+version: "2.1.0"
 slug: "tbb_inverter"
 description: "Lettura e controllo via RS485/MQTT dell'inverter TBB RiiO Sun II, con creazione automatica delle entita' in Home Assistant"
 url: "https://github.com/CarloFalco/ha-tbb-inverter-addon/tree/main/tbb_inverter"
@@ -13,6 +13,11 @@ startup: services
 # vuoto, host e credenziali vengono presi automaticamente da qui.
 services:
   - mqtt:want
+# Cartella condivisa di Home Assistant: backup e ripristino dei parametri
+# finiscono in /share/tbb_inverter, raggiungibile da Samba e dall'editor.
+map:
+  - type: share
+    read_only: false
 options:
   serial_port: "/dev/ttyUSB0"
   baudrate: 9600

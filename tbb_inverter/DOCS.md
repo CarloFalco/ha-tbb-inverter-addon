@@ -12,6 +12,7 @@ Home Assistant.
 | [⚙ Canali calcolati](#-canali-calcolati) | Potenze ricavate dalle letture |
 | [⚡ Energy Dashboard](#-energy-dashboard) | Da watt a kWh |
 | [🎛️ Comandi di scrittura](#-comandi-di-scrittura) | SmartPort e frame raw |
+| [💾 Backup e ripristino](#-backup-e-ripristino-dei-parametri) | Salvare e ripristinare la configurazione dell'inverter |
 | [📡 Topic MQTT](#-topic-mqtt) | Riferimento completo dei topic |
 | [🛠️ Risoluzione problemi](#-risoluzione-problemi) | Cosa fare quando non funziona |
 | [🛡 Impronta sul sistema](#-impronta-sul-sistema) | Risorse usate e salute del Raspberry Pi |
@@ -175,6 +176,8 @@ le entità già configurate:
 | SmartPort modalità | — | `sensor.tbb_riio_sun_ii_smart_port_mode` |
 | **Carica completa batteria** *(interruttore)* | — | `switch.tbb_riio_sun_ii_bat_full_charge` |
 | **Capacità riservata batteria** *(scrivibile)* | % | `number.tbb_riio_sun_ii_bat_reserved_capacity` |
+| **Corrente max carica da generatore** *(scrivibile)* | A | `number.tbb_riio_sun_ii_gen_charge_current` |
+| Backup / Anteprima ripristino / Ripristina parametri *(pulsanti)* | — | `button.tbb_riio_sun_ii_param_backup` … |
 
 Le voci con ⚙ sono [canali calcolati](#-canali-calcolati). `bat_status` vale
 *In carica*, *In scarica* o *A riposo*, ricavato dal segno della corrente di
@@ -504,6 +507,10 @@ Cosa guardare, nell'ordine:
 | `<prefix>/cmd/smart_port_w/status` | `OK` / `ERRORE` |
 | `<prefix>/cmd/bat_full_charge/status` | `OK` / `ERRORE` — comando `ON` / `OFF` |
 | `<prefix>/cmd/bat_reserved_capacity/status` | `OK` / `ERRORE` — comando intero 0-100 |
+| `<prefix>/cmd/gen_charge_current/status` | `OK` / `ERRORE` — comando intero 1-100 |
+| `<prefix>/cmd/param_backup/status` | `OK` / `ERRORE` |
+| `<prefix>/cmd/param_restore_preview/status` | `OK` / `ERRORE` — payload: nome del file, o `PRESS` |
+| `<prefix>/cmd/param_restore/status` | `OK` / `ERRORE` — payload: nome del file, o `PRESS` |
 | `<prefix>/cmd/raw/status` | `OK` / `ERRORE` |
 
 `ERRORE` arriva anche quando l'inverter risponde con un'**eccezione** (tipo
@@ -513,6 +520,82 @@ I frame trasmessi da una scrittura (`TX`) e le relative risposte (`RX`)
 compaiono già con `log_level: info`, perché sono rari e sono la
 prima cosa da guardare. Con `log_level: debug` si aggiungono anche i frame
 esadecimali di **ogni ciclo di lettura**.
+
+---
+
+## 💾 Backup e ripristino dei parametri
+
+L'add-on sa leggere e scrivere la configurazione dell'inverter come l'app
+TBBLink. Tre pulsanti, nella sezione *Configurazione* del dispositivo:
+
+| Pulsante | Cosa fa | Scrive sull'inverter? |
+|---|---|:---:|
+| **Backup parametri inverter** | Salva tutti i parametri in `/share/tbb_inverter/backup_<data>_<ora>.txt` | no |
+| **Anteprima ripristino parametri** | Confronta `/share/tbb_inverter/ripristina.txt` con l'inverter e scrive nel log cosa cambierebbe | **no** |
+| **Ripristina parametri inverter** | Scrive i valori diversi e li rilegge uno per uno | sì |
+
+La cartella `/share` è quella condivisa di Home Assistant: la raggiungi con
+l'add-on *Samba share* (cartella `share`) o con *File editor*/*Studio Code
+Server*.
+
+### Il file
+
+Una riga per parametro: banco (`A` o `B`), registro, valore. Tutto ciò che
+segue `#` è un commento.
+
+```
+# --- Parametri ripristinabili (93) ------------------------------
+A 0x001f     1   # Modalita' SmartPort (0 Smart Load, 1 Smart Gen, 2 City GEN)  [Cbo_ACFlexMode]
+A 0x005e     7   # Corrente massima generatore A  [Edt_MaxAlternatorCurrent]
+B 0x002b 12000   # Ingresso AC: disconnetti sopra tensione batteria (12.00 V per blocco da 12 V = 48.00 V)  [lineEdit_ACI_DisconnectBAT]
+B 0x005c     5   # Corrente massima di carica da generatore / AC in 2  [Edt_MaxGeneratorChargeCurrent]
+...
+# --- Solo lettura o non mappati, ignorati dal ripristino (367) ---
+#~ A 0x0000  2300
+#~ A 0x0004 48000
+...
+```
+
+> ⚠️ **Le tensioni sono per blocco da 12 V.** Su un sistema a 48 V il valore
+> va moltiplicato per 4: `12000` = 12,00 V × 4 = **48,00 V**. Il commento lo
+> riporta già convertito. Per impostare 46,0 V scrivi `11500`, non `46000`.
+
+### Procedura di ripristino
+
+1. Premi **Backup parametri inverter**: è il tuo punto di ritorno.
+2. Copia il backup (o un backup precedente) come `ripristina.txt` nella stessa
+   cartella e, se serve, modifica i valori.
+3. Premi **Anteprima ripristino parametri** e leggi il log:
+
+   ```
+   [NOTICE] ANTEPRIMA da ripristina.txt: 1 da modificare, 90 gia' uguali, 2 ignorati
+   [NOTICE]   B 0x005c: 5 -> 15   Corrente massima di carica da generatore / AC in 2 [Edt_MaxGeneratorChargeCurrent]
+   ```
+
+4. Se le modifiche elencate sono quelle che vuoi, premi **Ripristina parametri
+   inverter**.
+
+### Cosa il ripristino non fa, di proposito
+
+- **Non scrive i registri commentati** (`#~`): misure, dati di targa, registri
+  di fabbrica. Il backup li contiene per completezza, ma riscriverli potrebbe
+  danneggiare la configurazione. Ripristina solo i ~90 parametri che la
+  schermata impostazioni dell'app sa scrivere.
+- **Non riscrive valori uguali**: tocca solo ciò che cambia.
+- **Non scrive `65535`**, che significa «non usato», né su un registro che
+  sull'inverter vale 65535.
+- **Non parte se anche una sola riga è sbagliata**: meglio nessuna modifica
+  che metà.
+- **Non accetta percorsi**: solo un nome di file `.txt` dentro
+  `/share/tbb_inverter`.
+
+Via MQTT si può indicare un file diverso da `ripristina.txt` mettendone il nome
+nel payload di `cmd/param_restore_preview` o `cmd/param_restore`.
+
+> I parametri della pagina *Battery* dell'app (corrente massima di carica,
+> tensioni di assorbimento e mantenimento…) stanno nel banco A ma non sono
+> ancora mappati: compaiono nel backup come righe commentate e il ripristino
+> non li tocca.
 
 ---
 
@@ -587,8 +670,16 @@ quelle del generatore si muovono.
 |---|---|
 | **Carica completa batteria** (interruttore) | Attiva o disattiva la carica completa («Battery Full Charge» nell'app TBBLink) |
 | **Capacità riservata batteria** (0-100 %) | SOC che l'inverter tiene di riserva («Battery Reserved Capacity») |
+| **Corrente max carica da generatore** (1-100 A) | Quanta corrente di carica la batteria può prendere dal generatore |
 
-La capacità riservata viene **riletta** dopo ogni modifica e ogni 10 minuti:
+> 💡 **Il generatore non sale fino al tetto della SmartPort?** Il tetto
+> (`SmartPort corrente`, registro `0x005E`) è un *massimo*: l'inverter preleva
+> dal generatore solo quello che serve per il carico più la carica della
+> batteria. Se la carica dal generatore è limitata, per esempio a 5 A, il
+> generatore resta ben sotto il tetto. Alza la *Corrente max carica da
+> generatore* e la potenza del generatore dovrebbe salire, fino al tetto.
+
+Capacità riservata e corrente di carica vengono **rilette** dopo ogni modifica e ogni 10 minuti:
 l'entità mostra il valore memorizzato dall'inverter, anche se lo cambi dall'app
 o dal pannello.
 

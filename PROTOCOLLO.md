@@ -9,7 +9,7 @@ proprietà; nessun codice dell'app è riportato qui.
 
 Ogni affermazione è marcata:
 
-- ✅ **verificato** sul campo, con l'inverter;
+- ✅ **verificato** sul campo, con l'inverter (RiiO Sun II 8.0S, ottobre 2026);
 - 🔎 **ricavato** dall'app, coerente ma non ancora provato;
 - ❓ **dedotto**, da confermare.
 
@@ -58,28 +58,32 @@ si ricavano byte, scala e segno. 🔎
 ### Frame `C0` sul RiiO Sun II
 
 Valori big-endian a 16 bit; l'offset è nel frame completo (payload + 6).
-Mappa ricavata dal pannello di monitoraggio dell'app per il RiiO Sun II. 🔎
-Le righe ✅ coincidevano già con le misure verificate sul campo.
+Mappa ricavata dal pannello di monitoraggio dell'app per il RiiO Sun II e
+**verificata sul campo**: con la rete assente e la SmartPort in Smart Gen,
+tensione × corrente del generatore coincide con la potenza riportata
+(240,1 V × 3,81 A ≈ 915 W) e il bilancio energetico chiude entro il 4 %.
+Il frame `C0` reale è lungo **170 byte**; un frame vero è nei test
+(`tests/test_backup.py`).
 
 | Byte | Grandezza | Scala | Segno | Chiave nell'add-on |
 |:---:|---|:---:|:---:|---|
-| 8 | potenza rete | W | sì | `ac_in_w` |
-| 10 | **potenza generatore** | W | sì | `gen_w` |
+| 8 | potenza rete | W | sì | `ac_in_w` ✅ |
+| 10 | **potenza generatore** | W | sì | `gen_w` ✅ positiva quando eroga |
 | 14 | potenza uscita AC | W | sì | `ac_out_w` ✅ |
-| 16 | potenza uscita AC 2 | W | sì | `ac_out2_w` |
-| 20 | tensione rete | ÷10 | | `ac_in_v` |
-| 22 | **tensione generatore** | ÷10 | | `gen_v` |
+| 16 | potenza uscita AC 2 | W | sì | `ac_out2_w` ✅ |
+| 20 | tensione rete | ÷10 | | `ac_in_v` ✅ |
+| 22 | **tensione generatore** | ÷10 | | `gen_v` ✅ |
 | 24 | tensione dell'inverter | ÷10 | | — |
-| 26 | tensione uscita AC | ÷10 | | `ac_out_v` |
-| 28 | tensione uscita AC 2 | ÷10 | | `ac_out2_v` |
+| 26 | tensione uscita AC | ÷10 | | `ac_out_v` ✅ |
+| 28 | tensione uscita AC 2 | ÷10 | | `ac_out2_v` ✅ |
 | 30 | corrente rete | ÷100 | sì | `ac_in_i` ✅ |
-| 32 | **corrente generatore** | ÷100 | sì | `gen_i` |
+| 32 | **corrente generatore** | ÷100 | sì | `gen_i` ✅ |
 | 34 | corrente dell'inverter | ÷100 | sì | — |
 | 36 | corrente uscita AC | ÷100 | sì | `ac_out_i` ✅ |
-| 38 | corrente uscita AC 2 | ÷100 | sì | `ac_out2_i` |
-| 40 | frequenza rete | ÷100 | | `ac_in_freq` |
-| 42 | frequenza generatore | ÷100 | | `gen_freq` |
-| 44 | frequenza uscita | ÷100 | | `ac_freq` |
+| 38 | corrente uscita AC 2 | ÷100 | sì | `ac_out2_i` ✅ |
+| 40 | frequenza rete | ÷100 | | `ac_in_freq` ✅ |
+| 42 | frequenza generatore | ÷100 | | `gen_freq` ✅ |
+| 44 | frequenza uscita | ÷100 | | `ac_freq` ✅ |
 | 50 | tensione batteria | ÷1000 | | `bat_v` ✅ |
 | 52 | corrente batteria | ÷10 | sì | `bat_i` ✅ |
 | 56-61, 66 | temperature | °C | | `t_*` ✅ |
@@ -113,10 +117,20 @@ stessi modelli che l'app usa per popolare la schermata impostazioni:
 | B | `0x0064` | 100 |
 | B | `0x00D0` | 31 |
 
-🔎 **Formato della risposta**: `7E 11 FF 03 <cmd> <len> <dati> <CRC>`. L'app
+✅ **Formato della risposta**: `7E 11 FF 03 <cmd> <len> <dati> <CRC>`. L'app
 estrae i dati con `mid(6, lunghezza − 8)` — subito dopo l'intestazione, senza
 eco — e li copia in un'immagine del banco a partire dal registro della
-*richiesta*. Una lettura sul campo (opzione `diag_params`) lo confermerà.
+*richiesta*. Verificato sul campo su entrambi i banchi, con tutti e sei i
+blocchi.
+
+✅ **Dati di targa** (banco A): `0x0000` = 2300 (230,0 V nominali), `0x0001` =
+5000 (50,00 Hz), `0x0004` = 48000 (sistema a 48 V), `0x0006` = 8000 (VA).
+
+✅ **Le tensioni dei parametri sono per blocco da 12 V**: soglie come `12000`
+o `11500` valgono ×4 su un sistema a 48 V (48,0 V, 46,0 V). Il fattore è la
+tensione nominale di `0x0004` divisa per 12000. ❓ È una deduzione dai
+valori, non trovata nel codice dell'app; i conti tornano su tutte le soglie
+lette.
 
 🔎 **Eccezioni**: una scrittura rifiutata riceve una risposta di tipo `0x86`
 (`0x80 | 0x06`), come in Modbus. L'app la gestisce in un ramo a parte; dalla
@@ -180,7 +194,7 @@ accetta 0-100. 🔎
 |:---:|:---:|---|---|
 | `0x001F` | A | `Cbo_ACFlexMode` («Smart Port Modeset») | 🔎 `0` Smart Load, `1` Smart Gen, `2` City GEN |
 | `0x005E` | A | `Edt_MaxAlternatorCurrent` | intero, ✅ 5-32 A nell'app |
-| `0x005C` | B | `Edt_MaxGeneratorChargeCurrent` | corrente massima di **carica** da generatore 🔎 |
+| `0x005C` | B | `Edt_MaxGeneratorChargeCurrent` | corrente massima di **carica** da generatore, in A di carica 🔎 |
 
 Il nome del campo dice «corrente massima dell'alternatore», cioè del
 generatore. Sul RiiO Sun II l'app mostra il campo in tutte e tre le modalità,

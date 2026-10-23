@@ -45,6 +45,8 @@ jobs:
         run: python tests/test_regressione_smartport.py
       - name: Run protocol tests
         run: python tests/test_protocollo.py
+      - name: Run backup & field-data tests
+        run: python tests/test_backup.py
 
   shell:
     name: Shell

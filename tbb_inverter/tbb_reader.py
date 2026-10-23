@@ -24,9 +24,11 @@ dalle opzioni dell'add-on in /data/options.json).
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
+from pathlib import Path
 
 import paho.mqtt.client as mqtt
 import serial
@@ -98,6 +100,11 @@ DIAG_STABLE_CYCLES = 3    # cicli di immobilita' prima che un byte faccia notizi
 LOG_LEVEL         = os.environ.get("LOG_LEVEL", "info").strip().lower()
 ADDON_VERSION     = os.environ.get("ADDON_VERSION", "dev")
 
+# Backup e ripristino dei parametri: la cartella condivisa di Home Assistant
+# (mappata in config.yaml), raggiungibile da Samba e dall'editor di file.
+BACKUP_DIR        = Path(os.environ.get("BACKUP_DIR", "/share/tbb_inverter"))
+RESTORE_FILE      = "ripristina.txt"
+
 # Topic derivati
 T_AVAILABILITY = f"{MQTT_PREFIX}/availability"
 T_STATE_JSON   = f"{MQTT_PREFIX}/stato"
@@ -117,6 +124,13 @@ T_CMD_FULL_CHARGE   = f"{MQTT_PREFIX}/cmd/bat_full_charge"
 T_FULL_CHARGE_STATE = f"{MQTT_PREFIX}/bat_full_charge"
 T_CMD_RESERVED      = f"{MQTT_PREFIX}/cmd/bat_reserved_capacity"
 T_RESERVED_STATE    = f"{MQTT_PREFIX}/bat_reserved_capacity"
+T_CMD_GEN_CHARGE    = f"{MQTT_PREFIX}/cmd/gen_charge_current"
+T_GEN_CHARGE_STATE  = f"{MQTT_PREFIX}/gen_charge_current"
+
+# Backup, anteprima e ripristino dei parametri di configurazione.
+T_CMD_BACKUP          = f"{MQTT_PREFIX}/cmd/param_backup"
+T_CMD_RESTORE_PREVIEW = f"{MQTT_PREFIX}/cmd/param_restore_preview"
+T_CMD_RESTORE         = f"{MQTT_PREFIX}/cmd/param_restore"
 
 DEVICE_ID = "tbb_riio_sun_ii"
 
@@ -140,6 +154,32 @@ REG_BAT_RESERVED      = 0x0072    # banco B, "Battery Reserved Capacity" (%)
 CMD_FULL_CHARGE, REG_FULL_CHARGE = 0x00, 0x03F3
 
 PARAM_REFRESH_S = 600     # ogni quanto rileggere i parametri esposti in HA
+
+# Corrente massima di carica dal generatore (banco B). Sul campo, con 5 la carica
+# dal generatore si fermava a ~5-6 A lato batteria: il valore e' in ampere di
+# carica. Il limite superiore e' prudenziale, l'app non lo dichiara.
+REG_GEN_CHARGE = 0x005C
+GEN_CHARGE_MIN, GEN_CHARGE_MAX = 1, 100
+
+REG_SYSTEM_VOLTAGE = 0x0004   # banco A: tensione nominale di sistema in mV (48000)
+
+# Registri che l'app ufficiale sa scrivere dalla propria schermata impostazioni,
+# per banco di lettura. Sono gli unici che il ripristino tocca: gli altri sono
+# misure, dati di targa o parametri di fabbrica.
+WRITABLE = {
+    BANK_A_READ: frozenset({0x0010, 0x0016, 0x001F, 0x003C, 0x005D, 0x005E, 0x00C1, 0x00C2}),
+    BANK_B_READ: frozenset(
+        {0x0007, 0x0012, 0x0013, 0x0014, 0x0015, 0x0016}
+        | set(range(0x0018, 0x0029))           # generatore, rele', fasce orarie rete
+        | set(range(0x002A, 0x003D))           # soglie rete, generatore, rele'
+        | {0x003E, 0x003F}
+        | set(range(0x0040, 0x004E))           # uscita AC2
+        | {0x0051, 0x0054, 0x0055, 0x0056, 0x005A, 0x005C, 0x0060, 0x0061, 0x0062}
+        | set(range(0x0063, 0x006F))           # Smart Load
+        | set(range(0x0070, 0x0075))           # soglie e ritardi batteria <-> rete
+        | {0x00DD, 0x00ED, 0x00EE}
+    ),
+}
 SMARTPORT_MODES = {0: "Smart Load", 1: "Smart Gen", 2: "City GEN"}
 
 # Blocchi che l'app legge per popolare la schermata impostazioni:
@@ -704,6 +744,37 @@ def cmd_full_charge(attiva: bool) -> bool:
     return True
 
 
+def write_param(banco_scrittura: int, registro: int, valore: int, etichetta: str,
+                topic_stato: str | None = None) -> int | None:
+    """
+    Scrive un parametro di un banco con un frame singolo e lo rilegge.
+
+    Ritorna il valore che l'inverter ha memorizzato (quello inviato, se la
+    rilettura non riesce), oppure None se la scrittura e' fallita o rifiutata.
+    Con `topic_stato` pubblica il valore come stato dell'entita'.
+    """
+    lettura = BANK_A_READ if banco_scrittura == BANK_A_WRITE else BANK_B_READ
+    banco = "A" if lettura == BANK_A_READ else "B"
+    log.log(25, "%s -> %d  (banco %s, registro %#06x)", etichetta, valore, banco, registro)
+    if not send_write_sequence([build_frame(banco_scrittura, registro, valore)]):
+        return None
+
+    letto = read_registers(lettura, registro, 1)
+    if letto is None:
+        log.info("Rilettura di %s non riuscita: uso il valore inviato", etichetta)
+        stato = valore
+    elif letto[0] != valore:
+        log.warning("Rilettura: %s = %d invece di %d -- l'inverter non ha "
+                    "memorizzato il valore", etichetta, letto[0], valore)
+        stato = letto[0]
+    else:
+        log.log(25, "Rilettura: %s = %d  (confermato)", etichetta, letto[0])
+        stato = letto[0]
+    if topic_stato and mqtt_client is not None:
+        mqtt_client.publish(topic_stato, stato, retain=True)
+    return stato
+
+
 def cmd_reserved_capacity(valore: int) -> bool:
     """
     Imposta la capacita' riservata della batteria (SOC minimo, %) e la rilegge.
@@ -714,26 +785,18 @@ def cmd_reserved_capacity(valore: int) -> bool:
     if not isinstance(valore, int) or not 0 <= valore <= 100:
         log.warning("Capacita' riservata non valida: %r (ammessi 0-100 %%)", valore)
         return False
-    log.log(25, "Capacita' riservata batteria -> %d %%  (banco B, registro %#06x)",
-            valore, REG_BAT_RESERVED)
-    if not send_write_sequence([build_frame(BANK_B_WRITE, REG_BAT_RESERVED, valore)]):
-        return False
+    return write_param(BANK_B_WRITE, REG_BAT_RESERVED, valore,
+                       "capacita' riservata batteria (%)", T_RESERVED_STATE) is not None
 
-    letto = read_registers(BANK_B_READ, REG_BAT_RESERVED, 1)
-    if letto is None:
-        log.info("Rilettura della capacita' riservata non riuscita: pubblico il "
-                 "valore inviato")
-        stato = valore
-    elif letto[0] != valore:
-        log.warning("Rilettura: capacita' riservata = %d %% invece di %d %% -- "
-                    "l'inverter non ha memorizzato il valore", letto[0], valore)
-        stato = letto[0]
-    else:
-        log.log(25, "Rilettura: capacita' riservata = %d %%  (confermato)", letto[0])
-        stato = letto[0]
-    if mqtt_client is not None:
-        mqtt_client.publish(T_RESERVED_STATE, stato, retain=True)
-    return True
+
+def cmd_gen_charge_current(valore: int) -> bool:
+    """Imposta la corrente massima di carica dal generatore (A) e la rilegge."""
+    if not isinstance(valore, int) or not GEN_CHARGE_MIN <= valore <= GEN_CHARGE_MAX:
+        log.warning("Corrente di carica da generatore non valida: %r (ammessi %d-%d A)",
+                    valore, GEN_CHARGE_MIN, GEN_CHARGE_MAX)
+        return False
+    return write_param(BANK_B_WRITE, REG_GEN_CHARGE, valore,
+                       "corrente max di carica da generatore (A)", T_GEN_CHARGE_STATE) is not None
 
 
 def refresh_parameters() -> int:
@@ -760,8 +823,13 @@ def refresh_parameters() -> int:
         riuscite += 1
         if mqtt_client is not None:
             mqtt_client.publish(T_RESERVED_STATE, riserva[0], retain=True)
-    log.debug("Parametri riletti: SmartPort %s, modalita' %s, capacita' riservata %s",
-              corrente, modo, riserva)
+    carica_gen = read_registers(BANK_B_READ, REG_GEN_CHARGE, 1)
+    if carica_gen:
+        riuscite += 1
+        if mqtt_client is not None:
+            mqtt_client.publish(T_GEN_CHARGE_STATE, carica_gen[0], retain=True)
+    log.debug("Parametri riletti: SmartPort %s, modalita' %s, capacita' riservata %s, "
+              "carica da generatore %s", corrente, modo, riserva, carica_gen)
     return riuscite
 
 
@@ -1021,8 +1089,8 @@ PARAM_NAMES = {
     (_B, 0x0064): ("lineEdit_ACO_PV_DisconnectPower", "Smart Load: stacca sotto potenza FV", ""),
     (_B, 0x0065): ("lineEdit_ACO_PV_ConnectSOC", "Smart Load: attacca sopra SOC",        "%"),
     (_B, 0x0066): ("lineEdit_ACO_PV_DisconnectSOC", "Smart Load: stacca sotto SOC",      "%"),
-    (_B, 0x0067): ("lineEdit_ACO_PV_ConnectBatVolt", "Smart Load: attacca sopra tensione batteria", ""),
-    (_B, 0x0068): ("lineEdit_ACO_PV_DisconnectBatVolt", "Smart Load: stacca sotto tensione batteria", ""),
+    (_B, 0x0067): ("lineEdit_ACO_PV_ConnectBatVolt", "Smart Load: attacca sopra tensione batteria", "mV"),
+    (_B, 0x0068): ("lineEdit_ACO_PV_DisconnectBatVolt", "Smart Load: stacca sotto tensione batteria", "mV"),
     (_B, 0x0069): ("lineEdit_ACO_PV_ConnectDelay", "Smart Load: ritardo aggancio",       ""),
     (_B, 0x006A): ("lineEdit_ACO_PV_DisconnectDelay", "Smart Load: ritardo sgancio",     ""),
     (_B, 0x006B): ("lineEdit_ACO_Load_ConnectPrecent", "Smart Load: attacca sopra carico", "%"),
@@ -1041,6 +1109,28 @@ PARAM_NAMES = {
 del _A, _B
 
 
+# Le soglie di tensione dei parametri sono espresse per blocco da 12 V: su un
+# sistema a 48 V "12000" vale 48,0 V. Il fattore si ricava dalla tensione
+# nominale letta nel banco A; finche' non e' nota si mostra il valore per blocco.
+_fattore_tensione = None
+
+
+def _aggiorna_fattore_tensione(mv: int):
+    global _fattore_tensione
+    if 12000 <= mv <= 96000 and mv % 12000 == 0:
+        _fattore_tensione = mv // 12000
+
+
+def testo_valore(v: int, unita: str) -> str:
+    """Valore leggibile per il log e per i file di backup."""
+    if unita == "mV":
+        base = f"{v / 1000:.2f} V per blocco da 12 V"
+        if _fattore_tensione:
+            return f"({base} = {v * _fattore_tensione / 1000:.2f} V)"
+        return f"({base})"
+    return unita
+
+
 def dump_parameters() -> int:
     """
     Legge i blocchi di parametri come l'app ufficiale e li riporta nel log:
@@ -1056,6 +1146,8 @@ def dump_parameters() -> int:
             log.info("PARAM banco %s %#06x x%d: lettura non riuscita", banco, primo, quanti)
             continue
         letti += 1
+        if (cmd, primo) == (BANK_A_READ, 0) and len(valori) > REG_SYSTEM_VOLTAGE:
+            _aggiorna_fattore_tensione(valori[REG_SYSTEM_VOLTAGE])
         for base in range(0, quanti, 10):
             riga = " ".join(f"{v:5d}" for v in valori[base:base + 10])
             log.info("PARAM banco %s %#06x | %s", banco, primo + base, riga)
@@ -1063,11 +1155,236 @@ def dump_parameters() -> int:
             voce = PARAM_NAMES.get((cmd, primo + i))
             if voce:
                 campo, significato, unita = voce
-                extra = f"  ({v / 1000:.2f} V)" if unita == "mV" else (f" {unita}" if unita else "")
+                extra = testo_valore(v, unita)
                 log.log(25, "PARAM %s %#06x = %5d%s  %s  [%s]",
-                        banco, primo + i, v, extra, significato, campo)
+                        banco, primo + i, v, f" {extra}" if extra else "", significato, campo)
         time.sleep(0.1)
     return letti
+
+
+# ================================================================
+# Backup e ripristino dei parametri
+# ================================================================
+
+def scrivibile(lettura: int, registro: int) -> bool:
+    """True se il ripristino puo' scrivere questo registro."""
+    return registro in WRITABLE.get(lettura, ())
+
+
+def read_all_parameters() -> tuple[dict, int]:
+    """
+    Legge tutti i blocchi di parametri. Ritorna ({(comando di lettura, registro):
+    valore}, numero di blocchi letti): chi chiama decide se un risultato
+    parziale e' accettabile.
+    """
+    valori, letti = {}, 0
+    for cmd, primo, quanti in PARAM_BLOCKS:
+        blocco = read_registers(cmd, primo, quanti)
+        if blocco is None:
+            log.warning("Lettura del blocco %s %#06x x%d non riuscita",
+                        "A" if cmd == BANK_A_READ else "B", primo, quanti)
+            continue
+        letti += 1
+        if (cmd, primo) == (BANK_A_READ, 0) and len(blocco) > REG_SYSTEM_VOLTAGE:
+            _aggiorna_fattore_tensione(blocco[REG_SYSTEM_VOLTAGE])
+        for i, v in enumerate(blocco):
+            valori[(cmd, primo + i)] = v
+        time.sleep(0.1)
+    return valori, letti
+
+
+def _riga_backup(lettura: int, registro: int, valore: int, commentata: bool) -> str:
+    banco = "A" if lettura == BANK_A_READ else "B"
+    riga = f"{'#~ ' if commentata else ''}{banco} {registro:#06x} {valore:5d}"
+    voce = PARAM_NAMES.get((lettura, registro))
+    if voce:
+        campo, significato, unita = voce
+        extra = testo_valore(valore, unita)
+        riga += f"   # {significato}{f' {extra}' if extra else ''}  [{campo}]"
+    return riga
+
+
+def backup_parameters() -> Path | None:
+    """
+    Salva tutti i parametri letti in un file di testo modificabile, in
+    BACKUP_DIR. Ritorna il percorso del file, o None se la lettura e' incompleta.
+    """
+    valori, letti = read_all_parameters()
+    if letti < len(PARAM_BLOCKS):
+        log.error("Backup annullato: letti %d blocchi di parametri su %d",
+                  letti, len(PARAM_BLOCKS))
+        return None
+
+    ripristinabili = sorted(k for k in valori if scrivibile(*k))
+    altri = sorted(k for k in valori if not scrivibile(*k))
+    righe = [
+        "# TBB RiiO Sun II - parametri di configurazione",
+        f"# Salvati da TBB Inverter Reader {ADDON_VERSION} il {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        "#",
+        "# Formato:  <banco> <registro> <valore>   # commento",
+        "# Per ripristinare: copia questo file come 'ripristina.txt' nella stessa",
+        "# cartella, modifica se serve i valori, premi 'Anteprima ripristino' e,",
+        "# se le modifiche elencate nel log sono quelle volute, 'Ripristina'.",
+        "# Il ripristino scrive solo le righe non commentate, e solo i valori",
+        "# diversi da quelli attuali. 65535 = non usato su questo modello.",
+        "# Le tensioni sono per blocco da 12 V: 12000 = 12,00 V x 4 = 48,00 V a 48 V.",
+        "#",
+        f"# --- Parametri ripristinabili ({len(ripristinabili)}) " + "-" * 30,
+        *(_riga_backup(k[0], k[1], valori[k], False) for k in ripristinabili),
+        "#",
+        f"# --- Solo lettura o non mappati, ignorati dal ripristino ({len(altri)}) " + "-" * 6,
+        *(_riga_backup(k[0], k[1], valori[k], True) for k in altri),
+        "",
+    ]
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    percorso = BACKUP_DIR / f"backup_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+    percorso.write_text("\n".join(righe), encoding="utf-8")
+    log.log(25, "Backup dei parametri salvato in %s (%d ripristinabili, %d in sola lettura)",
+            percorso, len(ripristinabili), len(altri))
+    return percorso
+
+
+_RIGA_PARAMETRO = re.compile(r"^([AB])\s+(0x[0-9a-fA-F]+|\d+)\s+(\d+)\s*(?:#.*)?$")
+
+
+def parse_parameters(testo: str) -> tuple[list, list]:
+    """
+    Interpreta un file di parametri. Ritorna (voci, errori): ogni voce e'
+    (comando di lettura, registro, valore, numero di riga). Le righe vuote e
+    quelle che iniziano con # vengono ignorate.
+    """
+    voci, errori = [], []
+    for n, riga in enumerate(testo.splitlines(), 1):
+        riga = riga.strip()
+        if not riga or riga.startswith("#"):
+            continue
+        m = _RIGA_PARAMETRO.match(riga)
+        if not m:
+            errori.append(f"riga {n}: formato non riconosciuto: {riga!r}")
+            continue
+        registro, valore = int(m.group(2), 0), int(m.group(3))
+        if registro > 0xFFFF or valore > 0xFFFF:
+            errori.append(f"riga {n}: registro o valore oltre 16 bit: {riga!r}")
+            continue
+        voci.append((BANK_A_READ if m.group(1) == "A" else BANK_B_READ, registro, valore, n))
+    return voci, errori
+
+
+def _file_parametri(nome: str) -> Path | None:
+    """Solo un nome semplice dentro BACKUP_DIR: niente percorsi dal payload MQTT."""
+    if not re.fullmatch(r"[\w.-]+\.txt", nome) or nome.startswith("."):
+        log.error("Nome di file non valido: %r (serve un nome .txt in %s)", nome, BACKUP_DIR)
+        return None
+    return BACKUP_DIR / nome
+
+
+def restore_parameters(nome: str = RESTORE_FILE, applica: bool = False) -> dict | None:
+    """
+    Confronta un file di parametri con i valori attuali dell'inverter e, con
+    `applica`, scrive quelli diversi. Senza `applica` e' un'anteprima: elenca
+    le modifiche nel log e non tocca nulla.
+
+    Vengono scritte solo le righe di registri ripristinabili (WRITABLE), mai il
+    valore 65535 (non usato) e mai un registro che sull'inverter vale 65535.
+    Un file con anche una sola riga non valida viene rifiutato per intero.
+    Ritorna un riepilogo, o None se il ripristino non e' partito.
+    """
+    tipo = "RIPRISTINO" if applica else "ANTEPRIMA"
+    percorso = _file_parametri(nome)
+    if percorso is None:
+        return None
+    if not percorso.is_file():
+        log.error("%s: file non trovato: %s", tipo, percorso)
+        return None
+    voci, errori = parse_parameters(percorso.read_text(encoding="utf-8", errors="replace"))
+    for errore in errori:
+        log.error("%s: %s", tipo, errore)
+    if errori:
+        log.error("%s annullato: correggi le righe segnalate in %s", tipo, percorso)
+        return None
+    if not voci:
+        log.error("%s annullato: nessun parametro in %s", tipo, percorso)
+        return None
+
+    attuali, letti = read_all_parameters()
+    if letti < len(PARAM_BLOCKS):
+        log.error("%s annullato: letti %d blocchi di parametri su %d",
+                  tipo, letti, len(PARAM_BLOCKS))
+        return None
+
+    modifiche, ignorati, uguali = [], [], 0
+    for lettura, registro, valore, n in voci:
+        banco = "A" if lettura == BANK_A_READ else "B"
+        chiave = f"{banco} {registro:#06x}"
+        if not scrivibile(lettura, registro):
+            ignorati.append(f"{chiave} (riga {n}): non ripristinabile")
+        elif valore == 0xFFFF:
+            ignorati.append(f"{chiave} (riga {n}): 65535 = non usato")
+        elif (lettura, registro) not in attuali or attuali[(lettura, registro)] == 0xFFFF:
+            ignorati.append(f"{chiave} (riga {n}): non usato su questo inverter")
+        elif attuali[(lettura, registro)] == valore:
+            uguali += 1
+        else:
+            modifiche.append((lettura, registro, attuali[(lettura, registro)], valore))
+
+    log.log(25, "%s da %s: %d da modificare, %d gia' uguali, %d ignorati",
+            tipo, percorso.name, len(modifiche), uguali, len(ignorati))
+    for lettura, registro, prima, dopo in modifiche:
+        voce = PARAM_NAMES.get((lettura, registro))
+        log.log(25, "  %s %#06x: %d -> %d%s", "A" if lettura == BANK_A_READ else "B",
+                registro, prima, dopo, f"   {voce[1]} [{voce[0]}]" if voce else "")
+    for motivo in ignorati:
+        log.info("  ignorato %s", motivo)
+
+    riepilogo = {"modifiche": len(modifiche), "uguali": uguali, "ignorati": len(ignorati),
+                 "scritti": 0, "falliti": 0}
+    if not applica:
+        return riepilogo
+
+    for lettura, registro, _prima, dopo in modifiche:
+        scrittura = BANK_A_WRITE if lettura == BANK_A_READ else BANK_B_WRITE
+        voce = PARAM_NAMES.get((lettura, registro))
+        etichetta = voce[1] if voce else f"registro {registro:#06x}"
+        if write_param(scrittura, registro, dopo, etichetta) == dopo:
+            riepilogo["scritti"] += 1
+        else:
+            riepilogo["falliti"] += 1
+    log.log(25, "RIPRISTINO completato: %d scritti, %d falliti",
+            riepilogo["scritti"], riepilogo["falliti"])
+    refresh_parameters()
+    return riepilogo
+
+
+# Backup e ripristino durano decine di secondi: girano in un thread a parte,
+# altrimenti bloccherebbero il loop di rete di paho fino a far scadere il
+# keepalive MQTT. Uno alla volta.
+_operazione_parametri = threading.Lock()
+_ultimo_lavoro = None
+
+
+def esegui_in_background(descrizione: str, funzione, topic_status: str):
+    """Esegue `funzione` in un thread; pubblica OK se ritorna un esito riuscito."""
+    global _ultimo_lavoro
+    if not _operazione_parametri.acquire(blocking=False):
+        log.warning("%s rifiutato: un'altra operazione sui parametri e' in corso", descrizione)
+        if mqtt_client is not None:
+            mqtt_client.publish(topic_status, "ERRORE")
+        return
+
+    def lavoro():
+        ok = False
+        try:
+            esito = funzione()
+            ok = esito is not None and not (isinstance(esito, dict) and esito.get("falliti"))
+        except Exception:
+            log.exception("%s: errore imprevisto", descrizione)
+        finally:
+            _operazione_parametri.release()
+        if mqtt_client is not None:
+            mqtt_client.publish(topic_status, "OK" if ok else "ERRORE")
+
+    _ultimo_lavoro = threading.Thread(target=lavoro, name=descrizione, daemon=True)
+    _ultimo_lavoro.start()
 
 
 # ================================================================
@@ -1307,6 +1624,41 @@ def discovery_payloads() -> list[tuple[str, dict]]:
             **comune,
         },
     ))
+    items.append((
+        f"{DISCOVERY_PREFIX}/number/{DEVICE_ID}/gen_charge_current/config",
+        {
+            "name": "Corrente max carica da generatore",
+            "unique_id": f"{DEVICE_ID}_gen_charge_current",
+            "object_id": f"{DEVICE_ID}_gen_charge_current",
+            "command_topic": T_CMD_GEN_CHARGE,
+            "state_topic": T_GEN_CHARGE_STATE,
+            "unit_of_measurement": "A",
+            "min": GEN_CHARGE_MIN, "max": GEN_CHARGE_MAX, "step": 1,
+            "mode": "box",
+            "icon": "mdi:battery-charging-high",
+            "entity_category": "config",
+            **comune,
+        },
+    ))
+    for key, nome, topic, icona in (
+        ("param_backup", "Backup parametri inverter", T_CMD_BACKUP, "mdi:content-save"),
+        ("param_restore_preview", "Anteprima ripristino parametri", T_CMD_RESTORE_PREVIEW,
+         "mdi:file-compare"),
+        ("param_restore", "Ripristina parametri inverter", T_CMD_RESTORE, "mdi:backup-restore"),
+    ):
+        items.append((
+            f"{DISCOVERY_PREFIX}/button/{DEVICE_ID}/{key}/config",
+            {
+                "name": nome,
+                "unique_id": f"{DEVICE_ID}_{key}",
+                "object_id": f"{DEVICE_ID}_{key}",
+                "command_topic": topic,
+                "payload_press": "PRESS",
+                "icon": icona,
+                "entity_category": "config",
+                **comune,
+            },
+        ))
     return items
 
 
@@ -1399,7 +1751,9 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     # Le sottoscrizioni vanno rifatte ad ogni connessione: dopo un riavvio del
     # broker una subscribe fatta una volta sola all'avvio andrebbe persa.
     topics = ([(t, 0) for t in SMARTPORT_COMMANDS]
-              + [(T_CMD_FULL_CHARGE, 0), (T_CMD_RESERVED, 0), (T_CMD_RAW, 0)])
+              + [(t, 0) for t in (T_CMD_FULL_CHARGE, T_CMD_RESERVED, T_CMD_GEN_CHARGE,
+                                  T_CMD_BACKUP, T_CMD_RESTORE_PREVIEW, T_CMD_RESTORE,
+                                  T_CMD_RAW)])
     client.subscribe(topics)
     log.debug("Sottoscritto a: %s", ", ".join(t for t, _ in topics))
 
@@ -1415,6 +1769,17 @@ def on_disconnect(client, userdata, flags, reason_code, properties=None):
     if _rc_failed(reason_code):
         log.warning("MQTT disconnesso (%s), riconnessione automatica in corso",
                     reason_code)
+
+
+def _payload_intero(payload: str) -> int | None:
+    """Intero da un payload MQTT; accetta "25" e "25.0", rifiuta decimali e NaN."""
+    try:
+        valore = float(payload)
+        if valore != valore or valore != round(valore):
+            return None
+        return int(valore)
+    except (ValueError, OverflowError):
+        return None
 
 
 def on_message(client, userdata, msg):
@@ -1462,18 +1827,29 @@ def on_message(client, userdata, msg):
                 ok = False
             client.publish(f"{msg.topic}/status", "OK" if ok else "ERRORE")
 
-        elif msg.topic == T_CMD_RESERVED:
-            try:
-                valore = float(payload)
-                if valore != valore or valore != round(valore):   # NaN o decimali
-                    raise ValueError(payload)
-                valore = int(valore)
-            except (ValueError, OverflowError):
-                log.warning("Capacita' riservata non numerica o non intera: %r", payload)
+        elif msg.topic in (T_CMD_RESERVED, T_CMD_GEN_CHARGE):
+            valore = _payload_intero(payload)
+            if valore is None:
+                log.warning("Valore non numerico o non intero su %s: %r", msg.topic, payload)
                 client.publish(f"{msg.topic}/status", "ERRORE")
                 return
-            ok = cmd_reserved_capacity(valore)
+            comando = cmd_reserved_capacity if msg.topic == T_CMD_RESERVED else cmd_gen_charge_current
+            ok = comando(valore)
             client.publish(f"{msg.topic}/status", "OK" if ok else "ERRORE")
+
+        elif msg.topic == T_CMD_BACKUP:
+            esegui_in_background("Backup parametri", backup_parameters, f"{msg.topic}/status")
+
+        elif msg.topic in (T_CMD_RESTORE_PREVIEW, T_CMD_RESTORE):
+            # Il pulsante invia PRESS: si usa il file predefinito. Via MQTT si
+            # puo' indicare un altro file della stessa cartella.
+            nome = payload.strip()
+            if nome in ("", "PRESS"):
+                nome = RESTORE_FILE
+            applica = msg.topic == T_CMD_RESTORE
+            esegui_in_background("Ripristino parametri" if applica else "Anteprima ripristino",
+                                 lambda: restore_parameters(nome, applica),
+                                 f"{msg.topic}/status")
 
         elif msg.topic == T_CMD_RAW:
             ok = cmd_raw(payload)
@@ -1624,6 +2000,7 @@ def banner():
              SMARTPORT_VOLTAGE)
     log.info("  Comandi:   %s/cmd/smart_port[_a|_w]  |  raw %s",
              MQTT_PREFIX, "abilitato" if ALLOW_RAW_COMMAND else "disabilitato")
+    log.info("  Backup:    %s  (ripristino da %s)", BACKUP_DIR, RESTORE_FILE)
     if DIAG_PARAMS:
         log.info("  DIAGNOSTICA PARAMETRI ATTIVA: al primo ciclo riuscito verranno "
                  "letti e riportati i parametri di configurazione.")
